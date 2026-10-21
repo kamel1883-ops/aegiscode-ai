@@ -1,0 +1,13 @@
+.git
+.github
+**/node_modules
+**/data
+docs
+assets
+tools
+**/test
+**/*.log
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md

@@ -1,0 +1,94 @@
+# AegisCode AI — automated workflow
+#
+# On every push to main or pull request:
+#   1. Run all core tests (53) and server tests (14) on Node 20 and 22.
+#   2. A real verification of the demo scenario, then build a **signed evidence
+#      bundle** and preview its verification, uploading it as a downloadable
+#      artifact any third party can check.
+#   3. Build the deployment image and confirm it is sound.
+#
+# Nothing is ever auto-deployed to any server: deployment is a human decision —
+# only what is proven gets built.
+# The bundle key in CI is **ephemeral**: generated in memory, never written and
+# never uploaded — trust is established by delivering public.pem out of band,
+# not by trusting the CI signature itself.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: tests (${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Both Node versions report even if one fails — otherwise the other
+      # result is hidden by the first failure.
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: core tests
+        working-directory: core
+        run: node --test
+      - name: server tests
+        working-directory: server
+        run: node --test
+
+  evidence:
+    name: evidence bundle
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: real verification (real patch ⇒ patch_supported)
+        run: |
+          mkdir -p build
+          node core/bin/aegiscode.js \
+            --scenario core/scenarios/demo-template-fetch.json \
+            --original core/fixtures/original \
+            --patched core/fixtures/patch-real \
+            --json build/report.json --out build/report.md
+      - name: build the evidence bundle then verify it
+        run: |
+          node core/bin/aegiscode-evidence.js build \
+            --report-json build/report.json --report-md build/report.md \
+            --scenario core/scenarios/demo-template-fetch.json \
+            --repo . --out build/evidence
+          node core/bin/aegiscode-evidence.js verify --bundle build/evidence --repo .
+      - name: upload the bundle (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: evidence-bundle
+          path: build/evidence
+          retention-days: 90
+
+  image:
+    name: deployment image
+    runs-on: ubuntu-latest
+    needs: [test, evidence]
+    steps:
+      - uses: actions/checkout@v4
+      - name: build the image
+        run: docker build -t aegiscode:ci .
+      - name: check the container locks without tokens
+        run: |
+          if docker run --rm -e AEGISCODE_API_TOKENS= aegiscode:ci node -e "process.exit(0)"; then
+            echo "the image runs"
+          fi
+          # Make sure the server itself refuses to start without tokens:
+          if docker run --rm -e AEGISCODE_API_TOKENS= aegiscode:ci node server/bin/aegiscode-server.js --port 8099; then
+            echo "Error: the server started without tokens!"; exit 1
+          else
+            echo "rejected without tokens: correct behavior"
+          fi

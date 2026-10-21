@@ -1,0 +1,22 @@
+# AegisCode AI — one-command deployment
+#
+# Usage:
+#   AEGISCODE_API_TOKENS="token1,token2" docker compose up -d
+#
+# Tokens are mandatory — the container refuses to start without them (the safe
+# default). Data (accounts, jobs and the audit log) lives in a separate volume
+# that survives restarts.
+
+services:
+  aegiscode:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      AEGISCODE_API_TOKENS: "${AEGISCODE_API_TOKENS:?Set the access tokens first — AEGISCODE_API_TOKENS=\"token1,token2\"}"
+    volumes:
+      - ac-data:/data
+    restart: unless-stopped
+
+volumes:
+  ac-data:

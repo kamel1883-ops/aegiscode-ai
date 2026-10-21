@@ -1,0 +1,29 @@
+{
+  "id": "demo-template-fetch",
+  "unsafe_event": "AC::UNSAFE_EVENT",
+  "legitimate_behavior_checks": ["AC::LEGITIMATE_OK"],
+  "baseline_environment": {
+    "description": "Baseline: the synthetic resource is not embedded, as in ordinary test environments",
+    "network": "loopback-only"
+  },
+  "permitted_interventions": [
+    { "kind": "synthetic_resource", "name": "template-endpoint" }
+  ],
+  "synthetic_resource_profile": {
+    "kind": "loopback_http",
+    "path": "/template",
+    "status": 200,
+    "body": "AC-RESOURCE-MARKER"
+  },
+  "intervention_validity_checks": {
+    "min_probes": 1,
+    "expect_status": 200,
+    "expect_body_contains": "AC-PROBE-OK"
+  },
+  "resource_limits": {
+    "timeout_ms": 5000,
+    "max_memory_mb": 128,
+    "max_output_bytes": 16384
+  },
+  "maximum_attempts": 2
+}

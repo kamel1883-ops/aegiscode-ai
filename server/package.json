@@ -1,0 +1,16 @@
+{
+  "name": "aegiscode-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AegisCode AI - API server: job queue, causal verdicts, human decisions, audit log",
+  "type": "module",
+  "main": "src/api.js",
+  "scripts": {
+    "start": "node bin/aegiscode-server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {}
+}

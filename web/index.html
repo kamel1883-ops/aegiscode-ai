@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AegisCode AI — Causal Patch-Efficacy Verification</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">AC</span>
+      <div>
+        <h1>AegisCode AI</h1>
+        <p class="tagline">Did the patch really fix the flaw — or did the test environment merely mask it?</p>
+      </div>
+    </div>
+    <div id="user-box" class="user-box hidden">
+      <span id="who"></span>
+      <button id="logout-btn" class="btn btn-ghost">Sign out</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Login / register screen -->
+    <section id="auth-view" class="card auth-card">
+      <h2>Sign in</h2>
+      <p class="hint">Type your username (letters only) and password first, then press "Create account". Messages never reveal whether a username exists.</p>
+      <form id="auth-form">
+        <label>Username
+          <input id="auth-username" autocomplete="username" required minlength="3" maxlength="32">
+        </label>
+        <label>Password
+          <input id="auth-password" type="password" autocomplete="current-password" required minlength="8">
+        </label>
+        <div class="row">
+          <button type="submit" class="btn btn-primary">Sign in</button>
+          <button type="button" id="register-btn" class="btn">Create account</button>
+        </div>
+      </form>
+      <p id="auth-error" class="error" role="alert"></p>
+    </section>
+
+    <!-- Work screen -->
+    <section id="app-view" class="hidden">
+      <div class="grid">
+        <!-- Submit a job -->
+        <div class="card">
+          <h2>New verification job</h2>
+          <p class="hint">Files are uploaded as text: <code>app.js</code> for the original version and another for the patched one. The code runs in full isolation — no internet, no secrets.</p>
+          <form id="job-form">
+            <label>Scenario id
+              <input id="scenario-id" value="my-scenario" required>
+            </label>
+            <label>Monitored unsafe event
+              <input id="unsafe-event" value="AC::UNSAFE_EVENT" required>
+            </label>
+            <label>Legitimate-behavior check
+              <input id="legit-check" value="AC::LEGITIMATE_OK" required>
+            </label>
+            <label>Original code (app.js)
+              <textarea id="original-code" rows="8" required spellcheck="false"></textarea>
+            </label>
+            <label>Patched code (app.js)
+              <textarea id="patched-code" rows="8" required spellcheck="false"></textarea>
+            </label>
+            <div class="row">
+              <button type="submit" class="btn btn-primary">Run causal verification</button>
+              <button type="button" id="load-demo" class="btn">Load demo scenario</button>
+            </div>
+          </form>
+          <p id="job-error" class="error" role="alert"></p>
+        </div>
+
+        <!-- Jobs -->
+        <div class="card">
+          <h2>My jobs</h2>
+          <div id="jobs-list" class="jobs"></div>
+        </div>
+      </div>
+
+      <!-- The report -->
+      <div id="report-card" class="card hidden">
+        <div class="report-head">
+          <h2>Verification report — <span id="report-id"></span></h2>
+          <a id="report-md-link" class="btn btn-ghost" target="_blank" rel="noopener">Download Markdown</a>
+        </div>
+        <div id="verdict-banner" class="verdict"></div>
+
+        <h3>Four-condition matrix</h3>
+        <table class="matrix" id="matrix">
+          <thead>
+            <tr><th>Version \ Environment</th><th>Baseline (resource withheld)</th><th>Substituted synthetic resource (guaranteed)</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+
+        <h3>Verdict reason and limitations</h3>
+        <p id="report-reason"></p>
+        <ul id="report-limits"></ul>
+
+        <div id="conventional" class="conventional"></div>
+
+        <h3>Human adoption</h3>
+        <p class="hint">The system emits the verdict and the evidence only. The decision is yours — recorded with your name and reason, and never edited.</p>
+        <div class="row" id="decision-row">
+          <button id="approve-btn" class="btn btn-ok">Approve patch</button>
+          <button id="reject-btn" class="btn btn-bad">Reject patch</button>
+        </div>
+        <label id="decision-reason-wrap" class="hidden">Decision reason (mandatory)
+          <input id="decision-reason" placeholder="Example: the vulnerability remains in condition D — the patch is not effective.">
+        </label>
+        <p id="decision-result" class="hint"></p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>AegisCode AI — no auto-merge and no code modification. The verdict and the evidence only; adoption is human.</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
