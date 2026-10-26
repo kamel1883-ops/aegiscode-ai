@@ -30,6 +30,10 @@ on:
         description: 'No budget ledger found yet — tick ONLY for the explicitly approved first validation session'
         type: boolean
         default: false
+      admin_reconcile:
+        description: 'Manual reconciliation ONLY: "jobKey:actualUsd" from provider billing. Set = reconcile and exit with NO model call.',
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -46,6 +50,7 @@ jobs:
     env:
       META_API_KEY: ${{ secrets.META_API_KEY }}
       META_MODEL_ID: muse-spark-1.3
+      META_RECONCILE: ${{ inputs.admin_reconcile }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

@@ -71,6 +71,28 @@ if (BUDGET_DIR) {
     console.error('Re-run with --first-run ONLY for the explicitly approved first validation session.');
     process.exit(1);
   }
+  // Manual reconciliation only: explicit, logged, never automatic.
+  // Format: --reconcile jobKey:actualUsd (or META_RECONCILE env). Reconciles
+  // a RESERVED entry to its provider-confirmed actual, then exits with NO call.
+  const reconcileRaw = flagValue('reconcile') ?? (process.env.META_RECONCILE?.trim() || null);
+  if (reconcileRaw) {
+    const sep = String(reconcileRaw).lastIndexOf(':');
+    const rKey = sep === -1 ? '' : String(reconcileRaw).slice(0, sep);
+    const rAmt = sep === -1 ? NaN : Number(String(reconcileRaw).slice(sep + 1));
+    if (!rKey || !Number.isFinite(rAmt) || rAmt < 0) {
+      console.error('BLOCKER: bad reconcile request — expected jobKey:actualUsd with a non-negative amount.');
+      process.exit(1);
+    }
+    const rec = await budget.reconcile({ jobKey: rKey, actualUsd: rAmt });
+    if (!rec.ok) {
+      console.error(`BLOCKER: reconcile failed — ${rec.code}: ${redact(rec.error)}`);
+      process.exit(1);
+    }
+    const s = budget.status();
+    console.log(`budget: reconciled ${rKey} to actual $${rAmt} (provider-confirmed) — remaining $${s.remaining_total_usd} of $${s.approved_total_usd} total`);
+    console.log('RECONCILE: DONE — no model call was made.');
+    process.exit(0);
+  }
   const runId = process.env.GITHUB_RUN_ID ?? 'local';
   const attempt = process.env.GITHUB_RUN_ATTEMPT ?? '1';
   jobKey = `ci-smoke-${runId}-${attempt}`;
