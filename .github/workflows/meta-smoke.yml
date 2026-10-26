@@ -1,0 +1,67 @@
+# AegisCode AI — bounded Meta live smoke test (manual only).
+#
+# Trigger: ONLY by hand (Actions tab → "meta-smoke" → Run workflow).
+# Never on push, never on pull requests, never on a schedule — so no code
+# change or outside contributor can spend credits.
+#
+# Secret wiring (the ONLY place the key exists in CI):
+#   Repository secret META_API_KEY on kamel1883-ops/aegiscode-ai
+#   (Settings → Secrets and variables → Actions). Confirmed present 2026-10-26.
+# The workflow below is the single explicit consumer:
+#   env: META_API_KEY: ${{ secrets.META_API_KEY }}
+# No other workflow references it, and GitHub injects it only at runtime.
+# Logs print model, usage, cost and request id — never the key.
+#
+# Budget: one tiny synthetic call, output capped at 50 tokens, ceiling $0.05.
+# Durable accounting: the ledger lives in ci-budget/, carried between runs by
+# the actions/cache below and enforced by the SAME BudgetManager rules as the
+# server ($10 total · $5/day · $2/job · $3 absolute · one live job · no reset).
+# Fail-closed: if the cache/ledger cannot be loaded, the probe refuses the
+# call — re-run with "confirm_first_run" ticked ONLY for an explicitly
+# approved session. Any failure (auth, billing, timeout) stops the run and its
+# status IS the report. Cache eviction also fails closed; it never resets spend.
+
+name: meta-smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_first_run:
+        description: 'No budget ledger found yet — tick ONLY for the explicitly approved first validation session'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# One live probe at a time, across all runs.
+concurrency:
+  group: meta-smoke
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: live smoke probe (≤ $0.05)
+    runs-on: ubuntu-latest
+    env:
+      META_API_KEY: ${{ secrets.META_API_KEY }}
+      META_MODEL_ID: muse-spark-1.3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: restore budget ledger (fail-closed on miss)
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-budget
+          key: meta-budget-v1
+          restore-keys: meta-budget-
+      - name: one bounded live call
+        run: node tools/meta-smoke.mjs --budget-dir ci-budget ${{ inputs.confirm_first_run && '--first-run' || '' }}
+      - name: persist budget ledger (always, even on failure)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ci-budget
+          key: meta-budget-v1-${{ github.run_id }}
