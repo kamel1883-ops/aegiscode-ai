@@ -129,7 +129,14 @@ const requestId =
   res.headers.get('x-request-id') ?? res.headers.get('x-requestid') ?? data?.id ?? '(not provided)';
 
 if (promptTokens === null || completionTokens === null || !text) {
+  // Shape diagnostic: key names and lengths only — never content or secrets.
+  const topKeys = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).slice(0, 25) : typeof data;
+  const usageKeys = data?.usage && typeof data.usage === 'object' ? Object.keys(data.usage).slice(0, 25) : typeof data?.usage;
+  const c0 = Array.isArray(data?.choices) && data.choices[0] && typeof data.choices[0] === 'object'
+    ? Object.keys(data.choices[0]).slice(0, 25)
+    : (Array.isArray(data?.choices) ? `array[${data.choices.length}]` : typeof data?.choices);
   console.error('BLOCKER: invalid_response — provider usage or text missing from the reply.');
+  console.error(`diagnostic: top_keys=${redact(JSON.stringify(topKeys))} usage=${redact(JSON.stringify(usageKeys))} choice0=${redact(JSON.stringify(c0))} text_len=${text.length}`);
   if (budget) console.error(`budget: $${MAX_COST_USD} stays reserved for ${jobKey} (uncertain usage is never auto-released)`);
   process.exit(1);
 }

@@ -201,8 +201,9 @@ My tools cannot record video: no video file is claimed to exist.
 
 ## 7. Known limitations and safety boundaries
 
-- Live access has not been tested and remains disabled pending clarification
-  of the payment-method requirement. No live call has ever been made.
+- Live access verified 2026-10-27: the stored key authenticates
+  (`muse-spark-1.3`, playground reply `SMOKE_OK`, no payment method required).
+  API response-shape diagnosis pending; project spend so far: $0.00.
 - `live_disabled` refuses and never substitutes mock output for a live result.
 - A key alone never marks the integration "connected" or "working".
 - The $0.05 per-cycle reservation is a conservative application-side ceiling,

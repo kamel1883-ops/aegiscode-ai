@@ -76,6 +76,8 @@ confidence.
 | ![The problem](assets/fig1-the-problem.svg) | The problem: two identical-looking outcomes |
 | ![The causal matrix](assets/fig2-causal-matrix.svg) | The four-condition causal matrix and verdicts |
 | ![The workflow loop](assets/fig3-workflow-loop.svg) | The end-to-end workflow loop |
+| ![The architecture](assets/fig4-architecture.svg) | The architecture: four lanes, one direction |
+| ![The roadmap](assets/fig5-roadmap.svg) | The self-healing loop and what is already built |
 
 Regenerate them (zero dependencies, plain SVG output):
 
@@ -138,8 +140,12 @@ AEGISCODE_API_TOKENS="token1,token2" docker compose up -d
 | `core/src/resource.js` | The synthetic loopback resource + the intervention-validity gate |
 | `core/src/evidence.js` | Guarantee map → code → test, Ed25519-signed evidence bundle |
 | `server/` | API server: job queue, accounts, sessions, audit log |
+| `server/src/meta-*.js`, `budget.js`, `advisory.js` | Meta advisory integration + central spending controls (hackathon-added) |
+| `server/bin/aegiscode-readiness.js` | Local readiness check: liveness, auth, demo-safe Meta state (no spend) |
+| `server/bin/aegiscode-demo-reset.js` | Demo reset: clears jobs/advisories, preserves budget, accounts, audit |
 | `web/` | The web UI (static files, no code execution) |
 | `core/fixtures/` | Experiment code: original / real patch / fake patch / hang |
+| `docs/16-demo-and-submission-en.md` | Demo ops, 2–3 min script, submission checklist, work-attribution table |
 
 ---
 
@@ -183,6 +189,84 @@ The verification engine is the trust anchor of the full autonomous loop:
 Steps 3 and beyond integrate with the Meta Model API during the hackathon.
 
 ---
+
+## Meta Model API advisory (hackathon integration)
+
+One end-to-end workflow is powered by the Meta Model API — and only one:
+
+1. **Explain** the verified finding, using the submitted code and the stored evidence.
+2. **Propose** a candidate patch (advisory only — never applied, never merged).
+3. **Verify** the candidate in the independent four-condition harness — unchanged.
+4. **Summarize** the observed harness results and the remaining limitations.
+
+The model's role is advisory in every stage: it never decides a verdict, and
+`core/` — the matrix, the classifier, the executor, the isolation and every
+assertion — is untouched by this integration. The candidate is untrusted
+code: it runs only inside the existing isolation boundary (separate agent,
+clean workspace, limits), and if the harness refuses it, the pipeline refuses
+with it. There is still no apply/merge/commit interface of any kind.
+
+### Model and pricing
+
+| | |
+|---|---|
+| Model | `muse-spark-1.3` (standard mode) |
+| Endpoint | `https://api.meta.ai/v1/chat/completions` (Bearer key) |
+| Pricing | $1.25 / 1M input tokens · $4.25 / 1M output tokens |
+| Source | [dev.meta.ai/docs/pricing-rate-limits](https://dev.meta.ai/docs/pricing-rate-limits) — verified 2026-10-26 |
+
+Standard mode is used rather than the cheaper Contributor mode, because
+Contributor mode permits Meta to use submitted content for training. Whether
+the **free-credit** terms (the dashboard warns that content may be used for
+product improvement while free credits are in use) differ from standard
+billing is **not resolved in Meta's public documentation** and is flagged here
+as requiring confirmation — this project makes no claim either way.
+
+### Integration states — an API key alone never means "working"
+
+| State | Meaning |
+|---|---|
+| `mock` | Default. No key, no network, outputs carry a visible `[mock output — …]` marker. |
+| `live_disabled` | `META_MODE=live` without `META_API_KEY`: the advisory refuses and **never** falls back to mock output. |
+| `live_configured` | A key is present. Not proof of connectivity. |
+| `live_verified` | At least one real call succeeded (persisted). |
+
+> **Live access verified 2026-10-27:** the stored key authenticates
+> (`muse-spark-1.3`, playground reply `SMOKE_OK`, no payment method required).
+> API response-shape diagnosis pending — project spend so far: $0.00.
+
+### Spending controls (all live calls pass through one budget manager)
+
+- Approved ceilings: **$10 total · $5/day · $2 per job by default · $3 absolute**.
+  A "job" is the whole cycle (explain + patch + summarize) — splitting it
+  cannot bypass the cap. Ceilings are never auto-reset or auto-increased.
+- Before the first call: a conservative **$0.05 per-cycle reservation** is
+  taken atomically (input estimated conservatively, output capped with
+  `max_completion_tokens`, zero automatic retries). Insufficient budget ⇒
+  the call is rejected with an explicit code, never attempted.
+- After the cycle: the reservation is reconciled with the provider-reported
+  usage (`usage.prompt_tokens` / `usage.completion_tokens`); costs stay marked
+  *estimated* until provider billing confirms. Uncertain usage stays reserved.
+- **One active live job at a time.** Accounting persists in
+  `data/meta-budget.json` (atomic writes, auditable by hand).
+
+### Configuration (server-side only — never committed, never sent to the browser)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `META_MODE` | `mock` | `mock` or `live`. |
+| `META_API_KEY` | — | The Meta API key (`LLM_…`), entered privately in the server's environment. |
+| `META_MODEL_ID` | `muse-spark-1.3` | Model override (no silent switching happens at runtime). |
+| `META_BASE_URL` | `https://api.meta.ai/v1` | Endpoint override for testing. |
+
+### Offline tests
+
+`server/test/meta.test.js` (12 tests) and `server/test/budget.test.js` (8
+tests) cover the four states, the refusal-to-fallback rule, request shape,
+ceilings, single-attempt behaviour, the full mock cycle through the real
+harness, the live accounting path with an **injected fetch stub** (no network),
+budget persistence, exhaustion and the one-live-job rule. Nothing in the
+test suite makes a live call.
 
 ## License
 
