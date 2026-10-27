@@ -151,15 +151,30 @@ const requestId =
   res.headers.get('x-request-id') ?? res.headers.get('x-requestid') ?? data?.id ?? '(not provided)';
 
 if (promptTokens === null || completionTokens === null || !text) {
-  // Shape diagnostic: key names and lengths only — never content or secrets.
-  const topKeys = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).slice(0, 25) : typeof data;
-  const usageKeys = data?.usage && typeof data.usage === 'object' ? Object.keys(data.usage).slice(0, 25) : typeof data?.usage;
-  const c0 = Array.isArray(data?.choices) && data.choices[0] && typeof data.choices[0] === 'object'
-    ? Object.keys(data.choices[0]).slice(0, 25)
-    : (Array.isArray(data?.choices) ? `array[${data.choices.length}]` : typeof data?.choices);
+  // Extended shape diagnostic: key names, finish reason, usage NUMBERS
+  // (counts are safe and needed for accounting) — never content or secrets.
+  const ch0 = Array.isArray(data?.choices) ? data.choices[0] : undefined;
+  const msg = ch0 && typeof ch0.message === 'object' && ch0.message !== null ? ch0.message : undefined;
+  const diag = {
+    finish_reason: ch0?.finish_reason ?? null,
+    message_keys: msg ? Object.keys(msg).slice(0, 25) : typeof msg,
+    content_type: msg ? (Array.isArray(msg.content) ? `array[${msg.content.length}]` : typeof msg.content) : 'n/a',
+    usage_values: data?.usage && typeof data.usage === 'object'
+      ? { prompt_tokens: data.usage.prompt_tokens ?? null, completion_tokens: data.usage.completion_tokens ?? null, total_tokens: data.usage.total_tokens ?? null }
+      : null,
+    text_len: typeof text === 'string' ? text.length : typeof text,
+  };
   console.error('BLOCKER: invalid_response — provider usage or text missing from the reply.');
-  console.error(`diagnostic: top_keys=${redact(JSON.stringify(topKeys))} usage=${redact(JSON.stringify(usageKeys))} choice0=${redact(JSON.stringify(c0))} text_len=${text.length}`);
-  if (budget) console.error(`budget: $${MAX_COST_USD} stays reserved for ${jobKey} (uncertain usage is never auto-released)`);
+  console.error(`diagnostic: ${redact(JSON.stringify(diag))}`);
+  if (budget && Number.isFinite(promptTokens) && Number.isFinite(completionTokens)) {
+    // The spend IS known even though the text is unusable: reconcile it so the
+    // ledger stays truthful and later runs are not blocked. The BLOCKER stands.
+    const actual = (promptTokens / 1e6) * INPUT_PER_MTOK + (completionTokens / 1e6) * OUTPUT_PER_MTOK;
+    await budget.reconcile({ jobKey, actualUsd: actual });
+    console.log(`budget: reconciled known usage to actual $${actual.toFixed(6)} for ${jobKey} (text unusable, spend accounted)`);
+  } else if (budget) {
+    console.error(`budget: $${MAX_COST_USD} stays reserved for ${jobKey} (uncertain usage is never auto-released)`);
+  }
   process.exit(1);
 }
 
