@@ -28,6 +28,7 @@ import { fileURLToPath } from 'node:url';
 
 import { detectNetworkIsolation } from './isolation.js';
 import { CONDITIONS } from './classify.js';
+import { executeSubject } from './executor.js';
 
 const RUNNER_PATH = fileURLToPath(new URL('./runner.js', import.meta.url));
 
@@ -204,6 +205,51 @@ function trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, a
   };
 }
 
+/** Random harness-owned functional inputs (never the expected output). */
+function makeFunctionalCases(count) {
+  const names = ['Layla', 'Omar', 'Nour', 'Sara', 'Karim', 'Mona'];
+  const cases = [];
+  for (let i = 0; i < count; i += 1) {
+    const name = `${names[Math.floor(Math.random() * names.length)]}${Math.floor(Math.random() * 1000)}`;
+    const n = 1 + Math.floor(Math.random() * 99);
+    cases.push({ name, n, expected: `AC::RENDERED:Hello, ${name}! Double=${n * 2}` });
+  }
+  return cases;
+}
+
+/**
+ * Runs the computed-render probes: engine passes ONLY inputs, computes each
+ * expected line internally, and requires exact match in every case. The
+ * expected string is never placed in the candidate environment.
+ */
+async function runComputedProbes({ subjectDir, limits, count }) {
+  const cases = makeFunctionalCases(count);
+  const results = [];
+  for (const c of cases) {
+    let run;
+    try {
+      run = await executeSubject({
+        subjectDir,
+        entry: 'app.js',
+        args: ['serve'],
+        env: { AC_FUNC_NAME: c.name, AC_FUNC_N: String(c.n) },
+        limits,
+        label: `functional-probe:${c.name}:${c.n}`,
+      });
+    } catch (err) {
+      results.push({ inputs: { name: c.name, n: c.n }, matched: false, error: String(err?.message ?? err) });
+      continue;
+    }
+    const out = `${run.stdout ?? ''}`;
+    results.push({
+      inputs: { name: c.name, n: c.n },
+      matched: run.status === 'completed' && out.includes(c.expected),
+      status: run.status,
+    });
+  }
+  return { cases: results, all_matched: results.length === count && results.every((r) => r.matched) };
+}
+
 /**
  * @param {object} params
  * @param {object} params.scenario  normalized scenario from validateScenario
@@ -260,6 +306,53 @@ export async function runMatrix({ scenario, subjects }) {
     const stdoutExcerpt = trial.condition.stdout_excerpt ?? '';
     const recurred = readObservation(stdoutExcerpt, scenario.unsafe_event);
     const legitimateOk = scenario.legitimate_behavior_checks.every((needle) => stdoutExcerpt.includes(needle));
+    // Functional contract (harness-owned inputs, engine-computed expected):
+    // - required rendered markers must appear in stdout, AND
+    // - when forbid_template_fetch_in_patch is set, zero requests to the
+    //   template path may reach the harness-owned resource (counted from the
+    //   harness request log, never from candidate output), AND
+    // - when require_computed_render is set, the engine passes ONLY inputs
+    //   (AC_FUNC_NAME/AC_FUNC_N) across 2 cases, computes each expected line
+    //   internally as `AC::RENDERED:Hello, {NAME}! Double={N*2}` without ever
+    //   passing the expected string to the candidate, and requires every
+    //   case output to match exactly. Echoing inputs verbatim fails because
+    //   the expected value is a computed transform, not an echo.
+    // Functionally forbidding /template is required because the intended
+    // feature is LOCAL rendering: the untrusted fetch is the vulnerability,
+    // not the feature. Deleting the fetch without restoring local computed
+    // rendering (stub/sneaky/echo) must fail.
+    const functionalChecks = scenario.functional_checks ?? { require_markers: [], forbid_template_fetch_in_patch: false, require_dynamic_echo: false, require_computed_render: false };
+    const isPatched = condition.version === 'patched';
+    let functional = null;
+    if (isPatched && trial.observation.status === 'completed') {
+      const required = functionalChecks.require_markers ?? [];
+      const missing = required.filter((m) => !stdoutExcerpt.includes(m));
+      const profilePath = scenario.synthetic_resource_profile?.path ?? '/template';
+      const sample = trial.condition.intervention?.sample_requests ?? [];
+      const templateRequests = sample.filter((r) => typeof r.url === 'string' && (r.url === profilePath || r.url.startsWith(`${profilePath}?`) || r.url.startsWith(`${profilePath}/`))).length;
+      const fetchOk = functionalChecks.forbid_template_fetch_in_patch ? templateRequests === 0 : true;
+      const renderedOk = missing.length === 0;
+      const computedOn = Boolean(functionalChecks.require_computed_render);
+      let computed = null;
+      if (computedOn) {
+        computed = await runComputedProbes({ subjectDir, limits, count: 2 });
+      }
+      const computedOk = computedOn ? (computed !== null && computed.all_matched) : true;
+      functional = {
+        rendered_present: required.length === 0 ? true : renderedOk,
+        rendered_missing: missing,
+        template_requests: templateRequests,
+        forbid_fetch: Boolean(functionalChecks.forbid_template_fetch_in_patch),
+        computed_render_required: computedOn,
+        computed_cases: computed?.cases ?? null,
+        computed_ok: computedOn ? computedOk : null,
+        dynamic_echo_required: Boolean(functionalChecks.require_dynamic_echo),
+        dynamic_echo_present: null,
+        functional_ok: renderedOk && fetchOk && computedOk,
+      };
+    } else if (isPatched) {
+      functional = { rendered_present: false, rendered_missing: functionalChecks.require_markers ?? [], template_requests: null, forbid_fetch: Boolean(functionalChecks.forbid_template_fetch_in_patch), computed_render_required: Boolean(functionalChecks.require_computed_render), computed_cases: null, computed_ok: false, dynamic_echo_required: Boolean(functionalChecks.require_dynamic_echo), dynamic_echo_present: false, functional_ok: false };
+    }
 
     observations[condition.key] = {
       ...trial.observation,
@@ -268,11 +361,13 @@ export async function runMatrix({ scenario, subjects }) {
       // In the baseline there is no intervention at all — the evidence is
       // neither required nor meaningful.
       intervention_valid: substituted ? trial.observation.intervention_valid : null,
+      functional_ok: functional ? functional.functional_ok : null,
       attempts,
     };
 
     conditions[condition.key] = {
       ...trial.condition,
+      functional,
       run_id: lastRunId,
       isolation: {
         network_namespace: isolation.network_namespace,

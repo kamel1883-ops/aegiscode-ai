@@ -119,6 +119,12 @@ async function main() {
     AC_CONDITION: job.condition,
   };
   if (resource) env.AC_RESOURCE_URL = resource.url;
+  // Harness-owned functional input: forwarded verbatim, never interpreted.
+  if (job.functionalEnv && typeof job.functionalEnv === 'object') {
+    for (const [k, v] of Object.entries(job.functionalEnv)) {
+      if (typeof v === 'string') env[k] = v;
+    }
+  }
 
   const run = await executeSubject({
     subjectDir: job.subjectDir,

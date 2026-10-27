@@ -7,6 +7,9 @@ export const FIXTURES = {
   original: path.join(here, '..', 'fixtures', 'original'),
   patchReal: path.join(here, '..', 'fixtures', 'patch-real'),
   patchFake: path.join(here, '..', 'fixtures', 'patch-fake'),
+  patchStub: path.join(here, '..', 'fixtures', 'patch-stub'),
+  patchSneaky: path.join(here, '..', 'fixtures', 'patch-sneaky'),
+  patchEcho: path.join(here, '..', 'fixtures', 'patch-echo'),
   hang: path.join(here, '..', 'fixtures', 'hang'),
 };
 

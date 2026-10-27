@@ -139,6 +139,25 @@ export function validateScenario(raw) {
     errors.push('maximum_attempts must be a positive integer');
   }
 
+  // 9. functional_checks (optional): externally-observable functional contract.
+  const functional = raw.functional_checks ?? {};
+  if (!isPlainObject(functional)) {
+    errors.push('functional_checks must be an object when present');
+  } else {
+    if (functional.require_markers !== undefined && (!Array.isArray(functional.require_markers) || !functional.require_markers.every((c) => typeof c === 'string' && c.trim() !== ''))) {
+      errors.push('functional_checks.require_markers must be an array of non-empty strings when present');
+    }
+    if (functional.forbid_template_fetch_in_patch !== undefined && typeof functional.forbid_template_fetch_in_patch !== 'boolean') {
+      errors.push('functional_checks.forbid_template_fetch_in_patch must be a boolean when present');
+    }
+    if (functional.require_dynamic_echo !== undefined && typeof functional.require_dynamic_echo !== 'boolean') {
+      errors.push('functional_checks.require_dynamic_echo must be a boolean when present');
+    }
+    if (functional.require_computed_render !== undefined && typeof functional.require_computed_render !== 'boolean') {
+      errors.push('functional_checks.require_computed_render must be a boolean when present');
+    }
+  }
+
   if (errors.length > 0) {
     return { ok: false, errors, scenario: null };
   }
@@ -169,6 +188,12 @@ export function validateScenario(raw) {
         max_output_bytes: limits.max_output_bytes ?? RESOURCE_LIMIT_DEFAULTS.max_output_bytes,
       },
       maximum_attempts: raw.maximum_attempts,
+      functional_checks: {
+        require_markers: Array.isArray(functional.require_markers) ? functional.require_markers.map((c) => c.trim()) : [],
+        forbid_template_fetch_in_patch: functional.forbid_template_fetch_in_patch ?? false,
+        require_dynamic_echo: functional.require_dynamic_echo ?? false,
+        require_computed_render: functional.require_computed_render ?? false,
+      },
     },
   };
 }

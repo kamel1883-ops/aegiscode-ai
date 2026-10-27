@@ -97,6 +97,9 @@ export function buildReport({ scenario, classification, conditions, observations
     },
     executor: executorSummary(conditions),
     verdict: classification.verdict,
+    security_verdict: classification.verdict,
+    functional: classification.functional ?? { status: 'not_assessed', reason: 'No functional assessment.', detail: null },
+    acceptance: classification.acceptance ?? { decision: 'needs_functional_review', reason: 'No acceptance decision.' },
     reason_code: classification.reason_code,
     reason: classification.reason,
     evidence: classification.evidence,
@@ -157,6 +160,16 @@ function renderMarkdown(report) {
   lines.push('');
   lines.push(`**Reason code:** \`${report.reason_code}\``);
   lines.push('');
+  lines.push(`**Security outcome:** \`${report.security_verdict ?? report.verdict}\``);
+  lines.push('');
+  lines.push(`**Functional regression:** \`${report.functional?.status ?? 'not_assessed'}\` — ${report.functional?.reason ?? ''}`);
+  lines.push('');
+  lines.push(`**Overall acceptance:** \`${report.acceptance?.decision ?? 'needs_functional_review'}\` — ${report.acceptance?.reason ?? ''}`);
+  lines.push('');
+  if (report.acceptance?.decision === 'rejected' && (report.security_verdict ?? report.verdict) === 'patch_supported') {
+    lines.push('> Security supported BUT functionality was removed or cannot be established. This is NOT a verified repair.');
+    lines.push('');
+  }
 
   lines.push('## Condition matrix');
   lines.push('');

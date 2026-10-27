@@ -74,6 +74,8 @@ function inconclusive(reasonCode, reason, evidence, limitation) {
     reason,
     evidence,
     limitations: [limitation],
+    functional: { status: 'not_assessed', reason: 'No functional assessment on an inconclusive security run.', detail: { C: null, D: null } },
+    acceptance: { decision: 'rejected', reason: 'Inconclusive security outcome cannot be accepted.' },
   };
 }
 
@@ -229,5 +231,46 @@ export function classify(observations) {
     };
   }
 
-  return { ...result, conventional_test: conventionalTest(a) };
+  const functional = assessFunctional(observations);
+  const acceptance = decideAcceptance(result.verdict, functional);
+  return { ...result, functional, acceptance, conventional_test: conventionalTest(a) };
+}
+
+/**
+ * Functional regression assessment — separate from the security verdict.
+ * Uses externally-observable harness evidence (harness-counted template
+ * requests + required rendered markers), never candidate assertions alone.
+ * A stub that prints success markers but renders nothing FAILS here even
+ * when the security verdict is patch_supported.
+ */
+function assessFunctional(observations) {
+  const c = observations?.C;
+  const d = observations?.D;
+  const hasContract = (c?.functional_ok !== null && c?.functional_ok !== undefined) || (d?.functional_ok !== null && d?.functional_ok !== undefined);
+  if (!hasContract) {
+    return { status: 'not_assessed', reason: 'No functional contract was declared for this scenario.', detail: { C: null, D: null } };
+  }
+  const cOk = c?.functional_ok === true;
+  const dOk = d?.functional_ok === true;
+  if (cOk && dOk) {
+    return { status: 'pass', reason: 'Patched code rendered the expected output in both environments with zero untrusted template fetches in the substituted condition.', detail: { C: c?.functional_ok ?? null, D: d?.functional_ok ?? null } };
+  }
+  const missing = [];
+  if (!cOk) missing.push('C');
+  if (!dOk) missing.push('D');
+  return { status: 'fail', reason: `Functional regression failed in condition(s) ${missing.join(' and ')}: expected rendered output was absent or an untrusted template fetch was observed. A security-only pass without functionality is NOT an accepted repair.`, detail: { C: c?.functional_ok ?? null, D: d?.functional_ok ?? null } };
+}
+
+/** Overall acceptance — never "Verified repair" on security alone. */
+function decideAcceptance(securityVerdict, functional) {
+  if (securityVerdict !== 'patch_supported') {
+    return { decision: 'rejected', reason: `Security outcome ${securityVerdict} does not support acceptance.` };
+  }
+  if (functional.status === 'pass') {
+    return { decision: 'accepted', reason: 'Security supported AND functional regression passed.' };
+  }
+  if (functional.status === 'fail') {
+    return { decision: 'rejected', reason: 'Security supported BUT functional regression failed — feature was removed or cannot be established. NOT a verified repair.' };
+  }
+  return { decision: 'needs_functional_review', reason: 'Security supported; no functional contract was assessed — do not present as a verified repair.' };
 }

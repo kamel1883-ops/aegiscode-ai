@@ -429,6 +429,8 @@ test('the live accounting path (stubbed provider): reservation, provider usage, 
       queue,
       budget: new BudgetManager(dataDir),
       client: createMetaClient({ env: { META_MODE: 'live', META_API_KEY: 'LLM_stub' }, fetchFn: fetchStub }),
+      isolationProbe: async () => ({ network_namespace: 'unshare -rn', prefix: ['unshare', '-rn', '--'], fallback_reason: null }),
+      allowLiveExecution: true,
     }),
   });
 });
@@ -458,6 +460,39 @@ test('budget exhaustion blocks a live advisory with an explicit code — the cal
       store,
       queue,
       budget: new BudgetManager(dataDir, { limits: { ...APPROVED_LIMITS, daily_usd: 0.01 } }),
+      client: createMetaClient({ env: { META_MODE: 'live', META_API_KEY: 'LLM_stub' }, fetchFn: fetchStub }),
+      isolationProbe: async () => ({ network_namespace: 'unshare -rn', prefix: ['unshare', '-rn', '--'], fallback_reason: null }),
+      allowLiveExecution: true,
+    }),
+  });
+});
+
+test('live execution is refused by default: partial safeguard, not a complete sandbox', async () => {
+  const fetchStub = async () => { throw new Error('provider must not be called when refused'); };
+  await withServer(async ({ call }) => {
+    const submit = await call('POST', '/api/jobs', {
+      scenario: demoScenario(),
+      original: { 'app.js': ORIGINAL },
+      patched: { 'app.js': PATCH_REAL },
+    });
+    const { id } = await submit.json();
+    await waitForJob(call, id);
+    const res = await call('POST', '/api/meta/advisory', {
+      source_job_id: id,
+      scenario: demoScenario(),
+      original: { 'app.js': ORIGINAL },
+    });
+    assert.equal(res.status, 400);
+    const body = await res.json();
+    assert.equal(body.code, 'isolation_unavailable');
+    assert.match(body.error, /partial safeguard|complete sandbox/);
+    const status = await (await call('GET', '/api/meta/status')).json();
+    assert.equal(status.budget.used_total_usd, 0, 'refusal spends nothing and reserves nothing');
+  }, {
+    meta: ({ store, queue, dataDir }) => new AdvisoryService({
+      store,
+      queue,
+      budget: new BudgetManager(dataDir),
       client: createMetaClient({ env: { META_MODE: 'live', META_API_KEY: 'LLM_stub' }, fetchFn: fetchStub }),
     }),
   });
