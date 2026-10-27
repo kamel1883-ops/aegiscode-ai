@@ -27,6 +27,9 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import { randomTimingSafeEqual } from './auth.js';
+import { BudgetManager } from './budget.js';
+import { createMetaClient } from './meta-client.js';
+import { AdvisoryService } from './advisory.js';
 
 const MAX_BODY_BYTES = 2_000_000;
 
@@ -123,15 +126,25 @@ function identify(req, tokens, accounts) {
  * @param {import('./queue.js').Queue} params.queue
  * @param {string[]} params.tokens allowed system tokens
  * @param {import('./accounts.js').AccountStore} params.accounts
+ * @param {import('./advisory.js').AdvisoryService} [params.meta] advisory service (defaults to a mock-mode one from env)
  * @returns {import('node:http').Server}
  */
-export function createApiServer({ store, queue, tokens, accounts }) {
+export function createApiServer({ store, queue, tokens, accounts, meta = null }) {
   if (!Array.isArray(tokens) || tokens.length === 0) {
     throw new Error('No access tokens: the server refuses to start without tokens (the safe default).');
   }
   if (!accounts) {
     throw new Error('The account store is mandatory: the server does not run without accounts.');
   }
+
+  // The Meta advisory service: mock mode by default (no key, no network, no
+  // live call — and no automatic call at startup in any mode).
+  const advisory = meta ?? new AdvisoryService({
+    store,
+    queue,
+    budget: new BudgetManager(store.dir),
+    client: createMetaClient({ env: process.env, dir: store.dir }),
+  });
 
   return createHttpServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -299,6 +312,71 @@ export function createApiServer({ store, queue, tokens, accounts }) {
         }
         sendJson(res, 200, { id: updated.id, decision: updated.human_decision });
         return;
+      }
+
+      // ---- Meta advisory: integration status (state, model, pricing, budget) ----
+      if (url.pathname === '/api/meta/status' && method === 'GET') {
+        sendJson(res, 200, await advisory.status());
+        return;
+      }
+
+      // ---- Meta advisory: start a cycle (stages A + B + C) ----
+      if (url.pathname === '/api/meta/advisory' && method === 'POST') {
+        const body = await readBody(req);
+        const owner = actor.scope === 'user' ? actor.username : null;
+        const result = await advisory.start({
+          sourceJobId: String(body.source_job_id ?? ''),
+          scenario: body.scenario,
+          original: body.original,
+          owner,
+        });
+        if (!result.ok) {
+          const status = ['source_not_found', 'not_found'].includes(result.code) ? 404
+            : ['advisory_exists', 'source_incomplete'].includes(result.code) ? 409
+              : 400;
+          sendJson(res, status, { error: result.error, code: result.code, details: result.details ?? undefined });
+          return;
+        }
+        sendJson(res, 202, { advisory: result.advisory });
+        return;
+      }
+
+      // ---- Meta advisory: stage D (summarize), cancel, or read ----
+      const advMatch = url.pathname.match(/^\/api\/meta\/advisory\/([A-Za-z0-9-]+)(?:\/(summarize|cancel))?$/);
+      if (advMatch) {
+        const id = advMatch[1];
+        const action = advMatch[2] ?? null;
+        const owner = actor.scope === 'user' ? actor.username : null;
+        // Isolation: someone else's advisory is treated as if it did not exist.
+        // A GET accepts either the advisory id or the source job id, so the UI
+        // can look up "the advisory of this job" directly.
+        const record = advisory.get(id) ?? advisory.findBySourceJob(id);
+        if (!record || (owner !== null && record.owner !== owner)) {
+          sendJson(res, 404, { error: 'Advisory not found.' });
+          return;
+        }
+        if (method === 'GET' && action === null) {
+          sendJson(res, 200, { advisory: advisory._view(record) });
+          return;
+        }
+        if (method === 'POST' && action === 'summarize') {
+          const result = await advisory.summarize({ id, owner });
+          if (!result.ok) {
+            sendJson(res, result.code === 'not_found' ? 404 : 409, { error: result.error, code: result.code });
+            return;
+          }
+          sendJson(res, 200, { advisory: result.advisory });
+          return;
+        }
+        if (method === 'POST' && action === 'cancel') {
+          const result = await advisory.cancel({ id, owner });
+          if (!result.ok) {
+            sendJson(res, result.code === 'not_found' ? 404 : 409, { error: result.error, code: result.code });
+            return;
+          }
+          sendJson(res, 200, { advisory: result.advisory });
+          return;
+        }
       }
 
       // ---- Audit log: a user sees only events for their own jobs ----

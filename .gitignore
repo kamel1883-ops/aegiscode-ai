@@ -3,3 +3,9 @@ build/
 *.log
 .DS_Store
 data/
+# Secrets: server credentials are environment-only, never committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key

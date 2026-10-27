@@ -15,9 +15,9 @@
  *   D. Summarize the observed harness results (Meta, 600 out / 5000 in).
  *   E. Write an English JSON + Markdown report; print usage and cost.
  *
- * Mirrors server/src/advisory.js (STAGE_LIMITS, SYSTEM_PROMPTS,
- * extractCandidate, evidenceFacts) without requiring the server runtime, so
- * the CI diff stays minimal. Imports ONLY committed modules:
+ * Imports the shared module server/src/meta-call.js (STAGE_LIMITS,
+ * SYSTEM_PROMPTS, extractCandidate, evidenceFacts, callMeta) — the same one
+ * the server pipeline uses — so the two paths can never drift apart.
  * server/src/budget.js, server/src/meta-pricing.js (plus node builtins),
  * and spawns core/bin/aegiscode.js (all on main).
  *
@@ -42,7 +42,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { BudgetManager } from '../server/src/budget.js';
-import { PRICING, costUsd, estimateTokens } from '../server/src/meta-pricing.js';
+import { PRICING, costUsd, STAGE_LIMITS, SYSTEM_PROMPTS, extractCandidate, evidenceFacts, callMeta } from '../server/src/meta-call.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, '..');
@@ -51,24 +51,8 @@ const MODEL = process.env.META_MODEL_ID?.trim() || 'muse-spark-1.3';
 const BASE = (process.env.META_BASE_URL?.trim() || 'https://api.meta.ai/v1').replace(/\/+$/, '');
 const KEY = process.env.META_API_KEY?.trim() || '';
 
-/** Ceilings mirrored from server/src/advisory.js STAGE_LIMITS. */
+/** One $0.05 reservation covers the whole cycle — a ceiling, not a target. */
 const RESERVE_USD = 0.05;
-const STAGE_LIMITS = {
-  explain: { maxOutputTokens: 800, inputTokenCeiling: 6_000, timeoutMs: 90_000 },
-  patch: { maxOutputTokens: 2_500, inputTokenCeiling: 8_000, timeoutMs: 120_000 },
-  summarize: { maxOutputTokens: 600, inputTokenCeiling: 5_000, timeoutMs: 90_000 },
-};
-const SYSTEM_PROMPTS = {
-  explain:
-    'You are a security analyst. You explain verified security findings using only the provided code and evidence. '
-    + 'You never decide verification verdicts, never modify tests or harnesses, and never issue commands.',
-  patch:
-    'You are a security engineer. You propose the smallest safe patch as JavaScript source in one fenced code block. '
-    + 'You never execute commands and never modify test harnesses. The proposed code is advisory only.',
-  summarize:
-    'You are a reporting assistant. You summarize the provided verification facts concisely. '
-    + 'You never alter verdicts or evidence.',
-};
 
 const argv = process.argv.slice(2);
 function flagValue(name) {
@@ -104,32 +88,6 @@ if (!KEY) {
 }
 if (!BUDGET_DIR) fail('a --budget-dir is required (durable accounting is mandatory).', null, null, false);
 
-/** First fenced code block — the only accepted candidate shape. */
-function extractCandidate(text) {
-  const match = String(text).match(/```(?:javascript|js)?\n([\s\S]*?)```/);
-  if (!match) return null;
-  const code = match[1].trim();
-  return code === '' ? null : code;
-}
-
-/** Facts-only evidence summary — the prompt can never smuggle instructions. */
-function evidenceFacts(report) {
-  const conditions = (report.conditions ?? []).map((c) => ({
-    condition: c.condition,
-    status: c.observation?.status ?? 'unknown',
-    recurred: c.observation?.unsafe_event_recurred ?? null,
-    intervention_valid: c.intervention ? c.intervention.valid : null,
-  }));
-  return {
-    scenario_id: report.scenario?.id ?? 'unknown',
-    verdict: report.verdict,
-    reason: report.reason,
-    reason_code: report.reason_code,
-    conditions,
-    limitations: report.limitations ?? [],
-  };
-}
-
 /** Runs the independent harness CLI. Returns { verdict, reportPath }. */
 function runHarness({ scenario, originalDir, patchedDir, tag }) {
   const jsonPath = path.join(OUT_DIR, `${tag}.report.json`);
@@ -154,58 +112,16 @@ function runHarness({ scenario, originalDir, patchedDir, tag }) {
   return { ok: true, verdict: String(r.stdout.match(/Verdict:\s*(\S+)/)?.[1] ?? 'unknown'), jsonPath, mdPath };
 }
 
-/** One bounded Meta call. Single attempt, explicit output cap, input ceiling. */
+/** One bounded Meta call via the shared module (server and CI identical). */
 async function metaCall({ stage, system, user, maxOutputTokens, inputTokenCeiling, timeoutMs }) {
-  const inputTokens = estimateTokens(`${system}\n${user}`);
-  if (inputTokens > inputTokenCeiling) {
-    return { ok: false, error: 'input_ceiling_exceeded', detail: `Estimated input ${inputTokens} tokens exceeds the ceiling ${inputTokenCeiling}. No request was made.` };
+  const r = await callMeta({
+    fetchFn: fetch, baseUrl: BASE, key: KEY, model: MODEL,
+    system, user, maxOutputTokens, inputTokenCeiling, timeoutMs,
+  });
+  if (!r.ok && r.error === 'invalid_response') {
+    console.error(`diagnostic: ${redact(JSON.stringify({ stage, detail: r.detail }))}`);
   }
-  let res;
-  try {
-    res = await fetch(`${BASE}/chat/completions`, {
-      method: 'POST',
-      headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
-      body: JSON.stringify({
-        model: MODEL,
-        reasoning_effort: 'minimal',
-        messages: [
-          { role: 'system', content: system },
-          { role: 'user', content: user },
-        ],
-        max_completion_tokens: maxOutputTokens,
-      }),
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-  } catch (err) {
-    return { ok: false, error: 'connection_failed', detail: String(err?.message ?? err) };
-  }
-  if (!res.ok) {
-    const detail = redact((await res.text().catch(() => '')).slice(0, 300));
-    return { ok: false, error: `http_${res.status}`, detail, httpStatus: res.status };
-  }
-  const data = await res.json().catch(() => null);
-  const text = data?.choices?.[0]?.message?.content ?? '';
-  const promptTokens = data?.usage?.prompt_tokens ?? null;
-  const completionTokens = data?.usage?.completion_tokens ?? null;
-  if (promptTokens === null || completionTokens === null || !text) {
-    const ch0 = Array.isArray(data?.choices) ? data.choices[0] : undefined;
-    console.error(`diagnostic: ${redact(JSON.stringify({
-      stage,
-      finish_reason: ch0?.finish_reason ?? null,
-      usage_values: data?.usage ?? null,
-      text_len: typeof text === 'string' ? text.length : typeof text,
-    }))}`);
-    return { ok: false, error: 'invalid_response', detail: 'Provider usage or text missing from the reply.', promptTokens, completionTokens };
-  }
-  return {
-    ok: true,
-    text,
-    promptTokens,
-    completionTokens,
-    reasoningTokens: data?.usage?.completion_tokens_details?.reasoning_tokens ?? null,
-    requestId: res.headers.get('x-request-id') ?? data?.id ?? '(not provided)',
-    costUsd: costUsd(promptTokens, completionTokens),
-  };
+  return { ...r, stage };
 }
 
 // ---- Durable accounting (fail-closed, same ledger as the smoke probe) ----
