@@ -31,7 +31,7 @@ on:
         type: boolean
         default: false
       admin_reconcile:
-        description: 'Manual reconciliation ONLY: "jobKey:actualUsd" from provider billing. Set = reconcile and exit with NO model call.',
+        description: 'Manual reconciliation ONLY - jobKey:actualUsd from provider billing. Set means reconcile and exit with NO model call.'
         type: string
         default: ''
 
