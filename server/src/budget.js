@@ -44,7 +44,7 @@ export class BudgetManager {
     this.path = path.join(dir, BUDGET_FILE);
     this.limits = limits;
     this.now = now;
-    /** @type {Array<{job_key:string, reserved_usd:number, state:'reserved'|'reconciled', actual_usd:number|null, live:boolean, created_at:string, reconciled_at:string|null}>} */
+    /** @type {Array<{job_key:string, reserved_usd:number, state:'reserved'|'held'|'reconciled', actual_usd:number|null, live:boolean, created_at:string, reconciled_at:string|null, held_at:string|null, hold_reason:string|null}>} */
     this.entries = [];
   }
 
@@ -68,6 +68,10 @@ export class BudgetManager {
   }
 
   _amount(entry) {
+    // Both open reservations and held historical liabilities count toward the
+    // ceilings. Only a reconciled entry counts at its provider-reported actual.
+    // Reasoning tokens are never added separately: costUsd prices the whole
+    // completion_tokens figure once (see server/src/meta-pricing.js).
     return entry.state === 'reconciled' ? (entry.actual_usd ?? 0) : entry.reserved_usd;
   }
 
@@ -91,7 +95,14 @@ export class BudgetManager {
   }
 
   activeLiveJobs() {
+    // 'held' entries are historical liabilities: still deducted from the
+    // totals, but they no longer occupy the single live-job slot. Only an
+    // entry with state 'reserved' blocks a new live reservation.
     return this.entries.filter((e) => e.state === 'reserved' && e.live === true);
+  }
+
+  heldEntries() {
+    return this.entries.filter((e) => e.state === 'held');
   }
 
   getEntry(jobKey) {
@@ -139,6 +150,25 @@ export class BudgetManager {
     return { ok: true };
   }
 
+  /**
+   * Moves an UNRESOLVED reservation to 'held' after its execution is known
+   * to be finished (e.g. its GitHub Actions run is completed) but its
+   * provider usage cannot be recovered. The amount stays deducted from the
+   * totals — it is never zeroed and never erased — but it no longer blocks
+   * the single live-job slot. A held entry can later be reconciled to a
+   * provider-confirmed actual or left held indefinitely.
+   */
+  async holdUnresolved({ jobKey, reason = '' }) {
+    const entry = this.getEntry(jobKey);
+    if (!entry) return { ok: false, code: 'no_reservation', error: 'No reservation to hold.' };
+    if (entry.state !== 'reserved') return { ok: false, code: 'not_open', error: 'Only an open reservation can be held.' };
+    entry.state = 'held';
+    entry.held_at = this.now().toISOString();
+    entry.hold_reason = String(reason).slice(0, 500);
+    await this._persist();
+    return { ok: true };
+  }
+
   /** Reconciles a reservation with the provider-reported actual cost. */
   async reconcile({ jobKey, actualUsd }) {
     const entry = this.getEntry(jobKey);
@@ -165,6 +195,7 @@ export class BudgetManager {
 
   /** A read-only accounting snapshot for the UI and the audit trail. */
   status() {
+    const held = this.heldEntries();
     return {
       approved_total_usd: this.limits.total_usd,
       used_total_usd: Number(this.usedTotalUsd().toFixed(6)),
@@ -176,6 +207,8 @@ export class BudgetManager {
       per_job_absolute_usd: this.limits.per_job_absolute_usd,
       open_reservations: this.entries.filter((e) => e.state === 'reserved').length,
       active_live_jobs: this.activeLiveJobs().length,
+      held_reservations: held.length,
+      held_total_usd: Number(held.reduce((sum, e) => sum + e.reserved_usd, 0).toFixed(6)),
     };
   }
 }

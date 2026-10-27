@@ -4,7 +4,12 @@
  *
  * ONE tiny synthetic call, no confidential content, no retries:
  *   - input: a fixed ~40-word prompt (far below any ceiling)
- *   - output cap: max_completion_tokens = 50 (Chat Completions field)
+ *   - reasoning: reasoning_effort "minimal" (lowest supported; "none" is
+ *     rejected with HTTP 400 on muse-spark-1.3)
+ *   - output cap: max_completion_tokens = 512 (Chat Completions field).
+ *     Reasoning tokens share this budget with visible text, so a 50-token
+ *     cap can starve the visible answer (empty content with finish_reason
+ *     "length"); 512 leaves room for minimal reasoning plus the short reply.
  *   - single attempt, 30 s timeout, then stop — success or honest failure
  *   - refuses to run without META_API_KEY; the key is never printed
  *
@@ -26,6 +31,7 @@
  */
 
 import { BudgetManager } from '../server/src/budget.js';
+import { costUsd } from '../server/src/meta-pricing.js';
 
 const MODEL = process.env.META_MODEL_ID?.trim() || 'muse-spark-1.3';
 const BASE = (process.env.META_BASE_URL?.trim() || 'https://api.meta.ai/v1').replace(/\/+$/, '');
@@ -93,6 +99,22 @@ if (BUDGET_DIR) {
     console.log('RECONCILE: DONE — no model call was made.');
     process.exit(0);
   }
+  // Historical-liability hold: moves an UNRESOLVED reservation to 'held' after
+  // its run is known completed but its usage cannot be recovered. The amount
+  // stays deducted; only the live-slot lock is released. No model call.
+  // Format: --hold jobKey (or META_HOLD env).
+  const holdRaw = flagValue('hold') ?? (process.env.META_HOLD?.trim() || null);
+  if (holdRaw) {
+    const rec = await budget.holdUnresolved({ jobKey: String(holdRaw), reason: 'run completed, usage unrecoverable — held as liability, not zeroed' });
+    if (!rec.ok) {
+      console.error(`BLOCKER: hold failed — ${rec.code}: ${redact(rec.error)}`);
+      process.exit(1);
+    }
+    const s = budget.status();
+    console.log(`budget: held ${holdRaw} as unresolved liability — used $${s.used_total_usd} of $${s.approved_total_usd} total, held $${s.held_total_usd}, active live jobs ${s.active_live_jobs}`);
+    console.log('HOLD: DONE — no model call was made.');
+    process.exit(0);
+  }
   const runId = process.env.GITHUB_RUN_ID ?? 'local';
   const attempt = process.env.GITHUB_RUN_ATTEMPT ?? '1';
   jobKey = `ci-smoke-${runId}-${attempt}`;
@@ -107,11 +129,16 @@ if (BUDGET_DIR) {
 
 const body = {
   model: MODEL,
+  // Lowest supported reasoning depth for a smoke test ("none" returns HTTP 400
+  // on muse-spark-1.3). Reasoning tokens share the output budget with visible
+  // text (https://dev.meta.ai/docs/reasoning), so the cap must leave room
+  // for both: 512 covers minimal reasoning plus the short visible reply.
+  reasoning_effort: 'minimal',
   messages: [
     { role: 'system', content: 'Reply with exactly: SMOKE_OK. No other text.' },
     { role: 'user', content: 'Connectivity smoke test. Reply with exactly: SMOKE_OK.' },
   ],
-  max_completion_tokens: 50,
+  max_completion_tokens: 512,
 };
 
 let res;
@@ -155,21 +182,28 @@ if (promptTokens === null || completionTokens === null || !text) {
   // (counts are safe and needed for accounting) — never content or secrets.
   const ch0 = Array.isArray(data?.choices) ? data.choices[0] : undefined;
   const msg = ch0 && typeof ch0.message === 'object' && ch0.message !== null ? ch0.message : undefined;
+  const reasoningTokens = data?.usage?.completion_tokens_details?.reasoning_tokens
+    ?? data?.usage?.output_tokens_details?.reasoning_tokens ?? null;
   const diag = {
     finish_reason: ch0?.finish_reason ?? null,
     message_keys: msg ? Object.keys(msg).slice(0, 25) : typeof msg,
     content_type: msg ? (Array.isArray(msg.content) ? `array[${msg.content.length}]` : typeof msg.content) : 'n/a',
     usage_values: data?.usage && typeof data.usage === 'object'
-      ? { prompt_tokens: data.usage.prompt_tokens ?? null, completion_tokens: data.usage.completion_tokens ?? null, total_tokens: data.usage.total_tokens ?? null }
+      ? { prompt_tokens: data.usage.prompt_tokens ?? null, completion_tokens: data.usage.completion_tokens ?? null, total_tokens: data.usage.total_tokens ?? null, reasoning_tokens: reasoningTokens }
       : null,
+    // Reasoning tokens are already included in completion_tokens: they are
+    // reported separately for transparency and must NOT be added twice.
+    request_id: data?.id ?? res.headers.get('x-request-id') ?? res.headers.get('x-requestid') ?? '(not provided)',
     text_len: typeof text === 'string' ? text.length : typeof text,
+    note: 'empty content with finish_reason "length" means the output cap (reasoning + visible) was exhausted — not a parser bug',
   };
   console.error('BLOCKER: invalid_response — provider usage or text missing from the reply.');
   console.error(`diagnostic: ${redact(JSON.stringify(diag))}`);
   if (budget && Number.isFinite(promptTokens) && Number.isFinite(completionTokens)) {
     // The spend IS known even though the text is unusable: reconcile it so the
     // ledger stays truthful and later runs are not blocked. The BLOCKER stands.
-    const actual = (promptTokens / 1e6) * INPUT_PER_MTOK + (completionTokens / 1e6) * OUTPUT_PER_MTOK;
+    // costUsd is the verified pricing table (reasoning already in completion).
+    const actual = costUsd(promptTokens, completionTokens);
     await budget.reconcile({ jobKey, actualUsd: actual });
     console.log(`budget: reconciled known usage to actual $${actual.toFixed(6)} for ${jobKey} (text unusable, spend accounted)`);
   } else if (budget) {
@@ -178,7 +212,7 @@ if (promptTokens === null || completionTokens === null || !text) {
   process.exit(1);
 }
 
-const cost = (promptTokens / 1e6) * INPUT_PER_MTOK + (completionTokens / 1e6) * OUTPUT_PER_MTOK;
+const cost = costUsd(promptTokens, completionTokens);
 console.log(`model: ${MODEL}`);
 console.log(`reply: ${redact(text.trim().slice(0, 80))}`);
 console.log(`usage: ${promptTokens} in / ${completionTokens} out (provider-reported)`);

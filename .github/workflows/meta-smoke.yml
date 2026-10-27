@@ -12,7 +12,9 @@
 # No other workflow references it, and GitHub injects it only at runtime.
 # Logs print model, usage, cost and request id — never the key.
 #
-# Budget: one tiny synthetic call, output capped at 50 tokens, ceiling $0.05.
+# Budget: one tiny synthetic call (reasoning_effort minimal, output cap 512
+# for reasoning + visible text), ceiling $0.05. Estimated worst case at the
+# verified table ($1.25/M in, $4.25/M out): ~35 in + 512 out ≈ $0.0023.
 # Durable accounting: the ledger lives in ci-budget/, carried between runs by
 # the actions/cache below and enforced by the SAME BudgetManager rules as the
 # server ($10 total · $5/day · $2/job · $3 absolute · one live job · no reset).
@@ -34,6 +36,10 @@ on:
         description: 'Manual reconciliation ONLY - jobKey:actualUsd from provider billing. Set means reconcile and exit with NO model call.'
         type: string
         default: ''
+      admin_hold:
+        description: 'Hold an UNRESOLVED reservation as liability (jobKey only). Keeps the amount deducted, releases the live slot. NO model call.'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -51,6 +57,7 @@ jobs:
       META_API_KEY: ${{ secrets.META_API_KEY }}
       META_MODEL_ID: muse-spark-1.3
       META_RECONCILE: ${{ inputs.admin_reconcile }}
+      META_HOLD: ${{ inputs.admin_hold }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
