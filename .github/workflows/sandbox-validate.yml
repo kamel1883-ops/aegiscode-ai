@@ -10,6 +10,8 @@
 # scenario network, absent credentials, resource termination, a real
 # container-mode matrix (security + functional + acceptance, not the
 # verdict alone), and a recorded image digest.
+# Host-file check proves non-access directly (host content absent from
+# candidate output); container-local reads are documented, not breaches.
 #
 # Trigger: ONLY by hand (Actions tab → "sandbox-validate" → Run workflow).
 # Never on push, pull requests, or a schedule.
@@ -42,6 +44,10 @@ jobs:
   validate:
     name: sandbox validation (no secrets, no model calls)
     runs-on: ubuntu-latest
+    # Fail-closed bound: bounded code worst case is ~15 min; GitHub default
+    # would be 360 min of silence. 25 min leaves margin, then the run fails
+    # and the always() uploads still preserve builder-tests-log + report.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
         with:
