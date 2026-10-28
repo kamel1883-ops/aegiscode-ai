@@ -166,6 +166,7 @@ function trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, a
       environment: condition.environment,
       subject_dir: subjectDir,
       run_id: runId,
+      container_evidence: containerEvidence ?? null,
       exit_code: run.exit_code,
       signal: run.signal,
       duration_ms: run.duration_ms,

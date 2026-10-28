@@ -97,6 +97,12 @@ test('candidate crash/timeout stays an ordinary verification outcome, not infra 
     assert.equal(out.ok, true, 'a candidate outcome must verify normally');
     assert.ok(out.infra_refused !== true, 'must not be marked as infra refusal');
     assert.ok(['patch_supported', 'environment_masked', 'interaction_dependent', 'inconclusive'].includes(out.verdict));
+    // Regression guard: the success branch must carry the evidence key
+    // (even when null in process mode) — its absence once hid container
+    // evidence for completed conditions.
+    for (const c of out.report.conditions) {
+      assert.ok('container_evidence' in c, `condition ${c.condition} must carry container_evidence`);
+    }
   } finally {
     if (prev !== undefined) process.env.AC_SANDBOX = prev;
   }
