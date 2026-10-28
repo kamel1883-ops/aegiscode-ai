@@ -467,7 +467,7 @@ test('budget exhaustion blocks a live advisory with an explicit code — the cal
   });
 });
 
-test('live execution is refused by default: partial safeguard, not a complete sandbox', async () => {
+test('live execution is refused by default: full local gate (network + fs + opt-in)', async () => {
   const fetchStub = async () => { throw new Error('provider must not be called when refused'); };
   await withServer(async ({ call }) => {
     const submit = await call('POST', '/api/jobs', {
@@ -485,7 +485,7 @@ test('live execution is refused by default: partial safeguard, not a complete sa
     assert.equal(res.status, 400);
     const body = await res.json();
     assert.equal(body.code, 'isolation_unavailable');
-    assert.match(body.error, /partial safeguard|complete sandbox/);
+    assert.match(body.error, /boundaries not all present|isolation|containment/);
     const status = await (await call('GET', '/api/meta/status')).json();
     assert.equal(status.budget.used_total_usd, 0, 'refusal spends nothing and reserves nothing');
   }, {

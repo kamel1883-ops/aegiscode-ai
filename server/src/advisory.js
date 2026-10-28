@@ -37,7 +37,7 @@ import { randomUUID } from 'node:crypto';
 import { validateScenario } from '../../core/src/schema.js';
 import { validateFiles } from './queue.js';
 import { META_STATES, ACCESS_NOTE_LIVE } from './meta-client.js';
-import { detectNetworkIsolation } from '../../core/src/isolation.js';
+import { assessIsolation } from '../../core/src/isolation.js';
 import { PRICING, costUsd, estimateTokens, STAGE_LIMITS, SYSTEM_PROMPTS, extractCandidate, evidenceFacts } from './meta-call.js';
 
 /** The conservative per-cycle reservation — a ceiling, not a target cost. */
@@ -58,7 +58,7 @@ export class AdvisoryService {
    * @param {import('./budget.js').BudgetManager} deps.budget
    * @param {ReturnType<import('./meta-client.js').createMetaClient>} deps.client
    */
-  constructor({ store, queue, budget, client, isolationProbe = detectNetworkIsolation, allowLiveExecution = false }) {
+  constructor({ store, queue, budget, client, isolationProbe = assessIsolation, allowLiveExecution = false }) {
     // allowLiveExecution=false by default: live untrusted execution stays disabled.
     this.store = store;
     this.queue = queue;
@@ -165,28 +165,42 @@ export class AdvisoryService {
     const id = `adv-${randomUUID()}`;
     const live = state === META_STATES.LIVE_CONFIGURED || state === META_STATES.LIVE_VERIFIED;
 
-    // Partial safeguard (live only): untrusted model candidates are refused
-    // unless a full sandbox is explicitly allowed AND a network namespace is
-    // present. Network-namespace availability alone does NOT authorize
-    // execution: the current check is only a partial safeguard, not a complete
-    // sandbox (host-filesystem reads were demonstrated offline). Production
-    // default is allowLiveExecution=false (refuse all live). Offline
+    // Full local gate (live only): untrusted model candidates run ONLY when
+    // network-namespace isolation AND Node filesystem containment both hold
+    // AND allowLiveExecution=true (production default false). Mock mode still
+    // runs because the mock candidate is owned fixture code. Offline
     // accounting tests pass allowLiveExecution=true with an isolated probe to
-    // prove reservation/reconciliation without authorizing production runs.
-    // Mock mode still runs because the mock candidate is owned fixture code.
+    // prove reservation/reconciliation without executing untrusted code here.
     if (live) {
-      let isolation = null;
+      let assessment = null;
       try {
-        isolation = await this.isolationProbe();
+        const probe = this.isolationProbe;
+        if (probe === assessIsolation || probe?.name === 'assessIsolation') {
+          assessment = await probe({ allowLiveExecution: this.allowLiveExecution });
+        } else {
+          const legacy = await probe();
+          const { supportsFsContainment } = await import('../../core/src/isolation.js');
+          const fs = await supportsFsContainment();
+          assessment = {
+            network_namespace: legacy?.network_namespace ?? 'unknown',
+            network_prefix: legacy?.prefix ?? null,
+            fs_containment: fs,
+            allowLiveExecution: Boolean(this.allowLiveExecution),
+            canExecuteUntrusted: Boolean(legacy?.prefix && fs.supported && this.allowLiveExecution),
+            reasons: [],
+          };
+        }
       } catch {
-        isolation = null;
+        assessment = null;
       }
-      if (!this.allowLiveExecution || !isolation || isolation.network_namespace === 'none') {
+      if (!assessment?.canExecuteUntrusted) {
         await this.store.record('meta.advisory.isolation_refused', sourceJobId, {
-          network_namespace: isolation?.network_namespace ?? 'unknown',
+          network_namespace: assessment?.network_namespace ?? 'unknown',
+          fs_containment: assessment?.fs_containment ?? null,
           allowLiveExecution: Boolean(this.allowLiveExecution),
+          reasons: assessment?.reasons ?? ['isolation assessment unavailable'],
         });
-        return { ok: false, code: 'isolation_unavailable', error: 'Live candidate execution is disabled here: the network-namespace check is only a partial safeguard, not a complete sandbox (host-filesystem access was demonstrated). Use mock mode here; live runs stay paused until filesystem, credential, network, process and resource boundaries are implemented and negatively tested.' };
+        return { ok: false, code: 'isolation_unavailable', error: `Live candidate execution refused: required boundaries not all present (network=${assessment?.network_namespace ?? 'unknown'}, fs=${assessment?.fs_containment?.supported ? 'contained' : 'missing'}, allowLive=${Boolean(this.allowLiveExecution)}). Use mock mode here; enable live only where network-namespace + filesystem containment + credential/process/resource boundaries are implemented and negatively tested.` };
       }
     }
 

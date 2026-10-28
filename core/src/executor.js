@@ -8,6 +8,10 @@
  *    no host environment variables leak through.
  *  - A strict deadline: on timeout the process is killed and recorded as
  *    timeout = failure, never success.
+ *  - Filesystem containment via the Node permission model: the subject may
+ *    read/write ONLY its own fresh workspace (--permission with
+ *    --allow-fs-read/--allow-fs-write scoped to the workspace). Host files
+ *    outside it fail with ERR_ACCESS_DENIED (negatively tested offline).
  *  - Memory cap and output-size cap.
  *  - Execution happens in a **separate child process** — uploaded code never
  *    runs inside the coordinator process.
@@ -23,6 +27,57 @@ import path from 'node:path';
 
 /** Host environment variables allowed to be inherited. Anything else never reaches the subject. */
 const ENV_ALLOWLIST = Object.freeze(['PATH', 'LANG']);
+
+/**
+ * Secret-bearing variables that must NEVER reach candidate code, even if a
+ * caller passes them explicitly in `env`. Denylist wins over everything.
+ */
+export const SECRET_DENYLIST = Object.freeze([
+  'META_API_KEY',
+  'AEGISCODE_API_TOKENS',
+  'GITHUB_TOKEN',
+  'GH_TOKEN',
+  'OPENAI_API_KEY',
+  'AWS_SECRET_ACCESS_KEY',
+  'AZURE_API_KEY',
+]);
+
+/** Only harness-owned AC_* names (uppercase, digits, underscore) may be injected. */
+const AC_KEY_RE = /^AC_[A-Z0-9_]+$/;
+
+/**
+ * Builds the minimal child environment: PATH/LANG only, plus validated AC_*
+ * entries. Secrets are stripped even when explicitly supplied.
+ */
+export function buildChildEnv({ workspace, env = {} }) {
+  const childEnv = {};
+  for (const key of ENV_ALLOWLIST) {
+    if (process.env[key] !== undefined) childEnv[key] = process.env[key];
+  }
+  for (const [key, value] of Object.entries(env)) {
+    if (SECRET_DENYLIST.includes(key)) continue;
+    if (!AC_KEY_RE.test(key)) continue;
+    if (typeof value !== 'string') continue;
+    childEnv[key] = value;
+  }
+  for (const key of SECRET_DENYLIST) delete childEnv[key];
+  childEnv.AC_WORKSPACE = workspace;
+  return childEnv;
+}
+
+/**
+ * Node permission flags constraining the subject to its own workspace.
+ * No child-process, no worker, no WASI, no inspector: the demo fixtures need
+ * none of them (verified offline: loopback fetch + console work fine).
+ */
+export function buildNodeArgs({ workspace, maxMemoryMb }) {
+  return [
+    '--permission',
+    `--allow-fs-read=${workspace}`,
+    `--allow-fs-write=${workspace}`,
+    `--max-old-space-size=${maxMemoryMb}`,
+  ];
+}
 
 /** Deletes the workspace and returns a deletion certificate verified against the disk. */
 async function cleanupWorkspace(workspace) {
@@ -56,19 +111,14 @@ export async function executeSubject({ subjectDir, entry = 'app.js', args = [], 
     workspace = await mkdtemp(path.join(tmpdir(), 'ac-run-'));
     await cp(subjectDir, workspace, { recursive: true, force: true });
 
-    // (2) Small explicit environment: PATH + explicitly inherited vars + the injected AC_* chain.
-    const childEnv = {};
-    for (const key of ENV_ALLOWLIST) {
-      if (process.env[key] !== undefined) childEnv[key] = process.env[key];
-    }
-    Object.assign(childEnv, env);
-    childEnv.AC_WORKSPACE = workspace;
+    // (2) Minimal environment via allowlist + AC_* validation + secret denylist.
+    const childEnv = buildChildEnv({ workspace, env });
 
     // (3) A run marker written to stderr so subject output stays separable from coordinator logs.
     await writeFile(path.join(workspace, '.ac-run-label'), label, 'utf8');
 
     const entryPath = path.join(workspace, entry);
-    const child = spawn(process.execPath, [`--max-old-space-size=${limits.max_memory_mb}`, entryPath, ...args], {
+    const child = spawn(process.execPath, [...buildNodeArgs({ workspace, maxMemoryMb: limits.max_memory_mb }), entryPath, ...args], {
       cwd: workspace,
       env: childEnv,
       stdio: ['ignore', 'pipe', 'pipe'],

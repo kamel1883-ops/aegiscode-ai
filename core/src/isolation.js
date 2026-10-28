@@ -22,10 +22,17 @@
  * produce a rejection, never a false verdict.
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
+
+const execFileAsync = promisify(execFile);
 
 /** Resolved once per coordinator process: which isolation pattern is available, if any. */
 let cachedProbe = null;
+let cachedFs = null;
 
 /** Candidate patterns in order: the conventional one, then the unprivileged-capable one. */
 const CANDIDATES = Object.freeze([
@@ -83,4 +90,67 @@ export function detectNetworkIsolation() {
   })();
 
   return cachedProbe;
+}
+
+/**
+ * Probes Node filesystem containment: a scratch workspace may read itself but
+ * must NOT read a host canary outside it. Cached per process. Offline-safe:
+ * no network, no secrets, small temp files only.
+ *
+ * @returns {Promise<{supported:boolean, detail:string}>}
+ */
+export function supportsFsContainment() {
+  if (cachedFs) return cachedFs;
+  cachedFs = (async () => {
+    let ws = null;
+    let canary = null;
+    try {
+      ws = await mkdtemp(path.join(tmpdir(), 'ac-fs-probe-'));
+      canary = path.join(tmpdir(), `ac-host-canary-${Date.now()}-${process.pid}.txt`);
+      await writeFile(canary, 'HOST_CANARY', 'utf8');
+      await writeFile(path.join(ws, 'probe.js'), "'use strict';const fs=require('fs');try{fs.readFileSync(process.env.AC_CANARY,'utf8');console.log('READ_OK');}catch(e){console.log('BLOCKED:'+(e.code||'ERR'));}", 'utf8');
+      const { stdout } = await execFileAsync(process.execPath, [
+        '--permission',
+        `--allow-fs-read=${ws}`,
+        `--allow-fs-write=${ws}`,
+        path.join(ws, 'probe.js'),
+      ], { env: { PATH: process.env.PATH, AC_CANARY: canary }, timeout: 10000 });
+      const blocked = String(stdout ?? '').includes('BLOCKED');
+      return blocked
+        ? { supported: true, detail: `Node permission containment verified: host read blocked (${ws} only).` }
+        : { supported: false, detail: 'Node permission probe unexpectedly read the host canary.' };
+    } catch (err) {
+      return { supported: false, detail: `Filesystem-containment probe failed: ${err?.message ?? err}` };
+    } finally {
+      if (ws) await rm(ws, { recursive: true, force: true }).catch(() => {});
+      if (canary) await rm(canary, { force: true }).catch(() => {});
+    }
+  })();
+  return cachedFs;
+}
+
+/**
+ * Full local assessment: network namespace + filesystem containment.
+ * Untrusted execution is allowed ONLY when every boundary holds AND the
+ * caller explicitly opts in with allowLiveExecution=true (production default
+ * is false). A Docker container (network=none, pids-limit, memory, read-only
+ * FS, no key mount) remains the recommended production target; this
+ * process-level boundary is the offline-tested local baseline, not a claim
+ * that containers are unnecessary.
+ */
+export async function assessIsolation({ allowLiveExecution = false } = {}) {
+  const [network, fs] = await Promise.all([detectNetworkIsolation(), supportsFsContainment()]);
+  const reasons = [];
+  if (!network.prefix) reasons.push(`network: ${network.fallback_reason}`);
+  if (!fs.supported) reasons.push(`filesystem: ${fs.detail}`);
+  if (!allowLiveExecution) reasons.push('policy: allowLiveExecution=false (live untrusted execution stays disabled by default).');
+  return {
+    network_namespace: network.network_namespace,
+    network_prefix: network.prefix,
+    network_fallback_reason: network.fallback_reason,
+    fs_containment: fs,
+    allowLiveExecution: Boolean(allowLiveExecution),
+    canExecuteUntrusted: Boolean(network.prefix && fs.supported && allowLiveExecution),
+    reasons,
+  };
 }
