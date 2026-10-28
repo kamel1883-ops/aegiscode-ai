@@ -61,6 +61,15 @@ export const CONTAINER_SECRET_DENYLIST = Object.freeze([
 
 const AC_KEY_RE = /^AC_[A-Z0-9_]+$/;
 const HOST_PATH_RE = /^[A-Za-z0-9_./:+-]+$/;
+
+/**
+ * Docker mount paths must use forward slashes: a Windows `C:\...` path with
+ * backslashes is rejected by HOST_PATH_RE and would not survive argv
+ * intact. `C:/...` is accepted by Docker Desktop file sharing.
+ */
+export function normalizeHostPath(p) {
+  return String(p ?? '').replace(/\\/g, '/');
+}
 const NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
 
 /** Sidecar: harness-owned resource address inside the isolated network. */
@@ -125,6 +134,7 @@ export function buildDockerRunArgs({
   name = null,
   labels = {},
 } = {}) {
+  workspaceHostPath = normalizeHostPath(workspaceHostPath);
   if (!workspaceHostPath || !HOST_PATH_RE.test(workspaceHostPath)) {
     throw new Error('container_refused: workspace host path is missing or unsafe');
   }
@@ -179,6 +189,8 @@ export function buildSidecarArgs({ image = SANDBOX_IMAGE, network, name = SIDECA
 
 /** Candidate container on the isolated network mounting core + subject read-only. */
 export function buildAgentArgs({ image = SANDBOX_IMAGE, network, coreDir, subjectDir, env = {}, name = null, labels = {} }) {
+  coreDir = normalizeHostPath(coreDir);
+  subjectDir = normalizeHostPath(subjectDir);
   if (!network || !NAME_RE.test(network)) throw new Error('container_refused: unsafe network name');
   if (!coreDir || !HOST_PATH_RE.test(coreDir)) throw new Error('container_refused: unsafe core mount');
   if (!subjectDir || !HOST_PATH_RE.test(subjectDir)) throw new Error('container_refused: unsafe subject mount');
