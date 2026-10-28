@@ -1,9 +1,10 @@
 # AegisCode AI — sandbox validation (manual only).
 #
 # What this proves, with owned fixtures and WITHOUT secrets or model calls:
-# host-file denial, blocked external egress, absent credentials, resource
-# termination, a real container-mode matrix (real ⇒ patch_supported,
-# fake ⇒ environment_masked), and a recorded image digest.
+# host-file denial, blocked external egress incl. the same --internal
+# scenario network, absent credentials, resource termination, a real
+# container-mode matrix (security + functional + acceptance, not the
+# verdict alone), and a recorded image digest.
 #
 # Trigger: ONLY by hand (Actions tab → "sandbox-validate" → Run workflow).
 # Never on push, pull requests, or a schedule.
@@ -39,13 +40,22 @@ jobs:
         with:
           node-version: 22
       - name: builder unit tests (offline, no daemon needed)
-        run: node --test core/test/container.test.js core/test/isolation.test.js
+        run: node --test core/test/container.test.js core/test/isolation.test.js 2>&1 | tee builder-tests.log; test ${PIPESTATUS[0]} -eq 0
       - name: run sandbox checks
         run: node tools/sandbox-check.mjs --out sandbox-out --image "${{ inputs.image }}"
+      - name: upload builder test log (always, even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-tests-log
+          path: builder-tests.log
+          if-no-files-found: warn
+          retention-days: 90
       - name: upload sandbox report (always, even on failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-report
           path: sandbox-out
+          if-no-files-found: warn
           retention-days: 90

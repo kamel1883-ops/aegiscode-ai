@@ -29,10 +29,19 @@ test('demo still verifies under containment: real patch ⇒ patch_supported (loo
   assert.equal(verdict, 'patch_supported');
 });
 
-test('network namespace is present in this environment and documented', async () => {
+test('network isolation is detected and honestly documented (namespace or fail-closed none)', async () => {
+  // Environment-dependent by design: privileged runners provide unshare -n/-rn,
+  // locked-down runners (e.g. GitHub ubuntu-26.04) refuse both. Both states are
+  // valid; what is asserted is honest documentation, never an assumed privilege.
   const net = await detectNetworkIsolation();
-  assert.ok(net.network_namespace && net.network_namespace !== 'none', `expected a network namespace here, got: ${JSON.stringify(net)}`);
-  assert.ok(Array.isArray(net.prefix) && net.prefix.length > 0);
+  if (net.network_namespace && net.network_namespace !== 'none') {
+    assert.ok(Array.isArray(net.prefix) && net.prefix.length > 0, `namespace claimed without a prefix: ${JSON.stringify(net)}`);
+    assert.equal(net.fallback_reason, null);
+  } else {
+    assert.equal(net.network_namespace, 'none');
+    assert.equal(net.prefix, null);
+    assert.ok(typeof net.fallback_reason === 'string' && net.fallback_reason.length > 20, 'fail-closed none must carry a documented reason');
+  }
 });
 
 test('filesystem containment probe passes: host reads blocked', async () => {
@@ -109,11 +118,17 @@ test('resource limits: hang ⇒ timeout, output bomb ⇒ truncated, memory hog �
 test('gate: untrusted execution requires network + fs + explicit opt-in; default refuses', async () => {
   const denied = await assessIsolation({ allowLiveExecution: false });
   assert.equal(denied.canExecuteUntrusted, false, 'default must refuse');
-  assert.ok(denied.network_prefix, 'network namespace expected in this env');
   assert.equal(denied.fs_containment.supported, true, denied.fs_containment.detail);
-
+  // Network state is environment-dependent; the gate must reflect it honestly.
+  // With a namespace, opt-in opens the gate; without one, it stays closed
+  // (fail-closed) and the missing-network reason is recorded.
   const allowed = await assessIsolation({ allowLiveExecution: true });
-  assert.equal(allowed.canExecuteUntrusted, true, `expected full boundary here, got: ${JSON.stringify(allowed.reasons)}`);
+  if (denied.network_prefix) {
+    assert.equal(allowed.canExecuteUntrusted, true, `expected full boundary here, got: ${JSON.stringify(allowed.reasons)}`);
+  } else {
+    assert.ok(denied.reasons.some((r) => typeof r === 'string' && r.startsWith('network:')), 'missing-network reason must be recorded');
+    assert.equal(allowed.canExecuteUntrusted, false, `without a namespace the gate must stay closed even with opt-in, got: ${JSON.stringify(allowed.reasons)}`);
+  }
 });
 
 test('non-AC env keys are stripped and workspace marker is set, not inherited', async () => {
