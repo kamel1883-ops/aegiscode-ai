@@ -78,20 +78,32 @@ export function runContainerAgent(
     const runId = job.runId;
     const net = network ?? `acn-${runId}`.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
     const sname = `${sidecarName}-${runId}`.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
+    // Baseline conditions (A, C) withhold the resource by design, so no
+    // sidecar is started for them — only substituted conditions (B, D) carry
+    // a resourceProfile. Passing the null baseline profile into the sidecar
+    // builder crashed every baseline condition (container_refused: bad
+    // sidecar profile). The isolated network itself is still created (the
+    // daemon gives it no external route), so baseline candidates stay
+    // contained with simply no resource to reach.
+    const needSidecar = Boolean(job.substituted && job.resourceProfile);
     const cleanup = [];
     try {
       await execFn('docker', buildNetworkCreateArgs(net), { timeout: 15000 });
       cleanup.push(['docker', ['network', 'rm', net]]);
-      await execFn(
-        'docker',
-        buildSidecarArgs({ image, network: net, name: sname, profile: job.resourceProfile, runId }),
-        { timeout: 30000 },
-      );
-      cleanup.push(['docker', ['rm', '-f', sname]]);
-      if (!(await waitSidecarReady(execFn, sname))) {
-        return { agent_error: 'Sidecar did not become ready on the isolated network.', stderr: await dockerLogs(execFn, sname) };
+      let sidecarAddress = null;
+      if (needSidecar) {
+        await execFn(
+          'docker',
+          buildSidecarArgs({ image, network: net, name: sname, profile: job.resourceProfile, runId }),
+          { timeout: 30000 },
+        );
+        cleanup.push(['docker', ['rm', '-f', sname]]);
+        if (!(await waitSidecarReady(execFn, sname))) {
+          return { agent_error: 'Sidecar did not become ready on the isolated network.', stderr: await dockerLogs(execFn, sname) };
+        }
+        sidecarAddress = sidecarUrl(sname);
       }
-      const containerJob = { ...job, subjectDir: '/subject', externalResourceUrl: sidecarUrl(sname) };
+      const containerJob = { ...job, subjectDir: '/subject', ...(sidecarAddress ? { externalResourceUrl: sidecarAddress } : {}) };
       const argv = buildAgentArgs({ image, network: net, coreDir, subjectDir: job.subjectDir, env: {} });
       return await new Promise((resolve) => {
         let stdout = '';
@@ -162,6 +174,11 @@ export async function runCandidateContainer(
   const workspace = await mkdtemp(path.join(tmpdir(), 'ac-cws-'));
   try {
     await cp(subjectDir, workspace, { recursive: true, force: true });
+    // mkdtemp creates 0700 dirs; the candidate runs as unprivileged 65532,
+    // so without this the container cannot even read its own workspace
+    // (observed on the runner as status=crash on every mounted probe).
+    // The workspace holds only a copy of the candidate code — never secrets.
+    await execFileAsync('chmod', ['-R', 'a+rwX', workspace], { timeout: 10000 });
     const { argv, timeoutSec } = buildDockerRunArgs({ image, workspaceHostPath: workspace, entry, args, env, limits });
     try {
       const { stdout, stderr } = await execFn('docker', argv, {

@@ -81,7 +81,7 @@ async function main() {
   // 3. Host-file denial.
   {
     const r = await runCandidateContainer({ image: pinned, subjectDir: FIX('host-read'), env: { AC_CANARY_PATH: '/etc/hostname' }, limits: LIMITS });
-    check('host-file denial', /AC::HOST_READ_BLOCKED/.test(r.stdout) && !/root:|localhost/.test(r.stdout), `status=${r.status}`);
+    check('host-file denial', /AC::HOST_READ_BLOCKED/.test(r.stdout) && !/root:|localhost/.test(r.stdout), `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
   }
   // 4. External egress blocked.
   {
@@ -89,7 +89,7 @@ async function main() {
     await writeFile(path.join(tmp, 'app.js'), `'use strict';if(process.argv[2]!=='serve')process.exit(2);console.log('AC::LEGITIMATE_OK');fetch('https://example.com/',{signal:AbortSignal.timeout(4000)}).then(async r=>{console.log('AC::EGRESS_OK:'+r.status);process.exit(0);}).catch(e=>{console.log('AC::EGRESS_BLOCKED:'+(e?.cause?.code||e?.code||'ERR'));process.exit(0);});\n`);
     try {
       const r = await runCandidateContainer({ image: pinned, subjectDir: tmp, env: {}, limits: LIMITS });
-      check('external egress blocked', /AC::EGRESS_BLOCKED/.test(r.stdout) && !/AC::EGRESS_OK/.test(r.stdout), (r.stdout.match(/AC::EGRESS_\w+/)?.[0] ?? r.status));
+      check('external egress blocked', /AC::EGRESS_BLOCKED/.test(r.stdout) && !/AC::EGRESS_OK/.test(r.stdout), `${r.stdout.match(/AC::EGRESS_\w+/)?.[0] ?? r.status} ${(r.stderr ?? '').slice(0, 200)}`);
     } finally {
       await rm(tmp, { recursive: true, force: true }).catch(() => {});
     }
@@ -141,12 +141,12 @@ async function main() {
   // 5. No credentials in candidate env.
   {
     const r = await runCandidateContainer({ image: pinned, subjectDir: FIX('env-leak'), env: { META_API_KEY: 'FAKE_MUST_NOT_PASS', AEGISCODE_API_TOKENS: 'FAKE_TOK' }, limits: LIMITS });
-    check('no credentials in candidate', /AC::LEAKED:NONE/.test(r.stdout) && !r.stdout.includes('FAKE_MUST_NOT_PASS'), `status=${r.status}`);
+    check('no credentials in candidate', /AC::LEAKED:NONE/.test(r.stdout) && !r.stdout.includes('FAKE_MUST_NOT_PASS'), `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
   }
   // 6. Resource termination.
   {
     const r = await runCandidateContainer({ image: pinned, subjectDir: FIX('hang'), env: {}, limits: LIMITS });
-    check('hang terminated as timeout', r.status === 'timeout', `status=${r.status}`);
+    check('hang terminated as timeout', r.status === 'timeout', `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
   }
   // 7. Real matrix in container mode (sidecar + gate + functional probes isolated; verdict on host).
   {
@@ -159,10 +159,17 @@ async function main() {
       ...demoScenario(),
       functional_checks: { require_markers: ['AC::TEMPLATE_RENDERED'], forbid_template_fetch_in_patch: true, require_dynamic_echo: false, require_computed_render: true },
     };
-    const real = await verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchReal });
+    let real = null;
+    let fake = null;
+    try {
+    real = await verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchReal });
     check('container matrix: real patch ⇒ patch_supported', real.ok && real.verdict === 'patch_supported', real.report?.reason ?? real.verdict);
-    const fake = await verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchFake });
-    check('container matrix: fake patch ⇒ environment_masked', fake.ok && fake.verdict === 'environment_masked', fake.report?.reason ?? fake.verdict);
+    fake = await verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchFake });
+    check('container matrix: fake patch ⇒ environment_masked', fake?.ok && fake?.verdict === 'environment_masked', fake?.report?.reason ?? fake?.verdict);
+    } catch (err) {
+      check('container matrix completes without transport crash', false, String(err?.message ?? err).slice(0, 300));
+    }
+    if (real && fake) {
     const d = real.report?.conditions?.find?.((c) => c.condition === 'D');
     check('container evidence: sidecar request log recorded', d && typeof d.functional?.template_requests === 'number', `template_requests=${d?.functional?.template_requests}`);
     const bReal = real.report?.conditions?.find?.((c) => c.condition === 'B');
@@ -186,6 +193,7 @@ async function main() {
       fake.report?.functional?.status !== 'pass' || fake.report?.acceptance?.decision === 'rejected',
       `fake functional=${fake.report?.functional?.status} acceptance=${fake.report?.acceptance?.decision}`
     );
+    }
   }
 
   const verdict = checks.every((c) => c.ok) ? 'sandbox_validated' : 'sandbox_failed';
