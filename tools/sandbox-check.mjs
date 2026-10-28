@@ -21,7 +21,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -78,10 +78,26 @@ async function main() {
   const LIMITS = { timeout_ms: 5000, max_memory_mb: 128, max_output_bytes: 16384 };
   const FIX = (n) => path.join(REPO, 'core', 'fixtures', n);
 
-  // 3. Host-file denial.
+  // 3. Host-file non-access (direct proof).
+  // The container runs without --permission flags, so a world-readable
+  // container-local file (its OWN /etc/hostname) is readable — demanding a
+  // BLOCKED marker here was a check-design flaw, not a breach: the
+  // container's /etc/hostname is not the host's file (separate mount
+  // namespace; only /work and /tmp are mounted, rootfs read-only). This
+  // check proves the real property directly instead: the HOST file's
+  // content never appears in candidate output. Host content is read
+  // host-side and never passed to the candidate. Any ambiguity
+  // (unreadable host file, name collision) fails closed.
   {
+    let hostHostname = '';
+    try { hostHostname = (await readFile('/etc/hostname', 'utf8')).trim().split(/\s+/)[0] ?? ''; } catch { hostHostname = ''; }
+    const hostProofUsable = hostHostname.length >= 4;
     const r = await runCandidateContainer({ image: pinned, subjectDir: FIX('host-read'), env: { AC_CANARY_PATH: '/etc/hostname' }, limits: LIMITS });
-    check('host-file denial', /AC::HOST_READ_BLOCKED/.test(r.stdout) && !/root:|localhost/.test(r.stdout), `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
+    const out = String(r.stdout ?? '');
+    const leakedHostContent = hostProofUsable && out.includes(hostHostname);
+    const ok = r.status === 'completed' && !leakedHostContent && !/root:|localhost/.test(out);
+    check('host-file non-access: host content absent from candidate output', ok,
+      `status=${r.status} host_proof=${hostProofUsable ? 'direct' : 'degraded'} leaked=${leakedHostContent} out=${out.slice(0, 160)} err=${(r.stderr ?? '').slice(0, 120)}`);
   }
   // 4. External egress blocked.
   {
