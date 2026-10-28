@@ -1,0 +1,51 @@
+# AegisCode AI — sandbox validation (manual only).
+#
+# What this proves, with owned fixtures and WITHOUT secrets or model calls:
+# host-file denial, blocked external egress, absent credentials, resource
+# termination, a real container-mode matrix (real ⇒ patch_supported,
+# fake ⇒ environment_masked), and a recorded image digest.
+#
+# Trigger: ONLY by hand (Actions tab → "sandbox-validate" → Run workflow).
+# Never on push, pull requests, or a schedule.
+#
+# Secrets: NONE. This workflow must not reference any secret; the checker
+# script refuses to run if META_API_KEY (or any listed secret) is present.
+# The Docker socket is used by the runner host only and is never mounted
+# into candidate containers (asserted in core/src/container.js builders).
+
+name: sandbox-validate
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: 'Candidate runtime image (tag; digest is resolved and recorded by the run)'
+        default: 'node:20-alpine'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sandbox-validate
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: sandbox validation (no secrets, no model calls)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: builder unit tests (offline, no daemon needed)
+        run: node --test core/test/container.test.js core/test/isolation.test.js
+      - name: run sandbox checks
+        run: node tools/sandbox-check.mjs --out sandbox-out --image "${{ inputs.image }}"
+      - name: upload sandbox report (always, even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sandbox-report
+          path: sandbox-out
+          retention-days: 90

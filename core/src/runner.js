@@ -70,9 +70,41 @@ async function main() {
   }
 
   // (2) Synthetic resource + validity gate — before any subject execution.
+  // External-resource mode (container transport): the harness-owned sidecar
+  // already listens on the isolated network at job.externalResourceUrl.
+  // The gate still runs HERE, before the subject, from the same validity
+  // checks — placement changed, authority did not. Request evidence comes
+  // from the sidecar's read-only log (fetched, never trusted from output).
   let resource = null;
   let intervention = null;
-  if (job.substituted) {
+  if (job.substituted && job.externalResourceUrl) {
+    const adapter = { url: job.externalResourceUrl, requests: [] };
+    const refreshLog = async () => {
+      try {
+        const res = await fetch(`${adapter.url}/__ac_log`);
+        if (res.ok) adapter.requests = await res.json();
+      } catch { /* gate below fails closed on missing evidence */ }
+    };
+    intervention = await verifyIntervention(adapter, job.validityChecks);
+    await refreshLog();
+    const minProbes = job.validityChecks?.min_probes ?? 1;
+    intervention.probes = adapter.requests.filter((r) => r && r.url === '/__ac_probe').length;
+    intervention.valid = intervention.actual_status === job.validityChecks?.expect_status
+      && intervention.body_matched === true
+      && intervention.probes >= minProbes;
+    if (!intervention.valid && intervention.probes < minProbes) {
+      intervention.reason = `Readiness probes (${intervention.probes}) below the required minimum (${minProbes}).`;
+    }
+    intervention.certificate = {
+      run_id: job.runId,
+      probed_at: new Date().toISOString(),
+      status: intervention.actual_status,
+      body_excerpt: intervention.body_excerpt ?? null,
+    };
+    log(harnessLog, `validity gate (external sidecar): ${intervention.valid ? 'passed' : 'failed'} — ${intervention.reason}`);
+    resource = { url: adapter.url, requests: adapter.requests, external: true, stop: async () => {} };
+  }
+  if (job.substituted && !resource) {
     try {
       resource = await startSyntheticResource({ profile: job.resourceProfile, runId: job.runId });
       log(harnessLog, `synthetic resource listening on ${resource.url}`);
@@ -135,9 +167,17 @@ async function main() {
     label: job.label ?? job.runId,
   });
 
-  // (4) Stop the resource and record the final state.
+  // (4) Stop the resource and record the final state. In external mode the
+  // sidecar is owned by the coordinator transport; refresh its request log
+  // once more so subject fetches are counted from harness evidence.
   if (resource) {
     await resource.stop().catch(() => {});
+    if (resource.external) {
+      try {
+        const res = await fetch(`${resource.url}/__ac_log`);
+        if (res.ok) resource.requests = await res.json();
+      } catch { /* keep the pre-run snapshot; gate already decided */ }
+    }
     intervention.requests_seen = resource.requests.length;
     intervention.sample_requests = resource.requests.slice(0, 20);
     log(harnessLog, `resource stopped after ${intervention.requests_seen} request(s)`);

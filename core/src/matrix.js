@@ -26,7 +26,9 @@
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
+import path from 'node:path';
 import { detectNetworkIsolation } from './isolation.js';
+import { SANDBOX_IMAGE } from './container.js';
 import { CONDITIONS } from './classify.js';
 import { executeSubject } from './executor.js';
 
@@ -222,13 +224,14 @@ function makeFunctionalCases(count) {
  * expected line internally, and requires exact match in every case. The
  * expected string is never placed in the candidate environment.
  */
-async function runComputedProbes({ subjectDir, limits, count }) {
+async function runComputedProbes({ subjectDir, limits, count, runSubject }) {
   const cases = makeFunctionalCases(count);
   const results = [];
+  const runOne = runSubject ?? ((params) => executeSubject(params));
   for (const c of cases) {
     let run;
     try {
-      run = await executeSubject({
+      run = await runOne({
         subjectDir,
         entry: 'app.js',
         args: ['serve'],
@@ -259,6 +262,18 @@ async function runComputedProbes({ subjectDir, limits, count }) {
 export async function runMatrix({ scenario, subjects }) {
   const limits = scenario.resource_limits;
   const isolation = await detectNetworkIsolation();
+  // Transport selection: default is the process agent under an optional
+  // network namespace. AC_SANDBOX=container selects the Docker transport
+  // (per-run --internal network + sidecar); anything else refuses loudly.
+  // The default path is byte-for-byte the proven behavior.
+  const sandboxMode = process.env.AC_SANDBOX === 'container' ? 'container' : 'process';
+  const sandboxImage = process.env.AC_SANDBOX_IMAGE || SANDBOX_IMAGE;
+  let runContainerAgent = null;
+  let runCandidateContainer = null;
+  if (sandboxMode === 'container') {
+    ({ runContainerAgent, runCandidateContainer } = await import('./container-run.js'));
+  }
+  const coreDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   const observations = {};
   const conditions = {};
 
@@ -293,7 +308,9 @@ export async function runMatrix({ scenario, subjects }) {
         validityChecks: substituted ? scenario.intervention_validity_checks : null,
       };
 
-      const agentOut = await runAgent({ job, prefix: isolation.prefix, outerTimeoutMs });
+      const agentOut = sandboxMode === 'container'
+        ? await runContainerAgent({ job, image: sandboxImage, coreDir, outerTimeoutMs })
+        : await runAgent({ job, prefix: isolation.prefix, outerTimeoutMs });
       trial = trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, attempts });
 
       // As long as the gate failed, retrying is legitimate (the resource may not
@@ -335,7 +352,16 @@ export async function runMatrix({ scenario, subjects }) {
       const computedOn = Boolean(functionalChecks.require_computed_render);
       let computed = null;
       if (computedOn) {
-        computed = await runComputedProbes({ subjectDir, limits, count: 2 });
+        // Functional probes use the SAME transport as the conditions:
+        // containerized candidates are probed containerized, never on host.
+        computed = await runComputedProbes({
+          subjectDir,
+          limits,
+          count: 2,
+          ...(sandboxMode === 'container'
+            ? { runSubject: (params) => runCandidateContainer({ image: sandboxImage, ...params }) }
+            : {}),
+        });
       }
       const computedOk = computedOn ? (computed !== null && computed.all_matched) : true;
       functional = {
@@ -372,6 +398,9 @@ export async function runMatrix({ scenario, subjects }) {
       isolation: {
         network_namespace: isolation.network_namespace,
         fallback_reason: isolation.fallback_reason,
+        sandbox: sandboxMode,
+        sandbox_image: sandboxMode === 'container' ? sandboxImage : null,
+        sandbox_image_digest: sandboxMode === 'container' ? (process.env.AC_SANDBOX_IMAGE_DIGEST ?? null) : null,
       },
     };
   }
@@ -382,6 +411,9 @@ export async function runMatrix({ scenario, subjects }) {
     isolation: {
       network_namespace: isolation.network_namespace,
       fallback_reason: isolation.fallback_reason,
+      sandbox: sandboxMode,
+      sandbox_image: sandboxMode === 'container' ? sandboxImage : null,
+      sandbox_image_digest: sandboxMode === 'container' ? (process.env.AC_SANDBOX_IMAGE_DIGEST ?? null) : null,
     },
   };
 }
