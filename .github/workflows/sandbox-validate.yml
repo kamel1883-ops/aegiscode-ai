@@ -31,7 +31,7 @@ on:
         default: 'fresh-aegiscode'
       image:
         description: 'Candidate runtime image (tag; digest is resolved and recorded by the run)'
-        default: 'node:20-alpine'
+        default: 'node:22-alpine'
 
 permissions:
   contents: read
