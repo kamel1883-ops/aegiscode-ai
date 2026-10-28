@@ -76,7 +76,7 @@ async function main() {
     }
   }
   const outDir = arg('out', 'sandbox-out');
-  const image = arg('image', process.env.AC_SANDBOX_IMAGE || 'node:20-alpine');
+  const image = arg('image', process.env.AC_SANDBOX_IMAGE || 'node:22-alpine');
   await mkdir(outDir, { recursive: true });
 
   const { dockerAvailable } = await import('../core/src/container.js');

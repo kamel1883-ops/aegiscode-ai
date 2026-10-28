@@ -141,10 +141,13 @@ export function runContainerAgent(
         let stdout = '';
         let stderr = '';
         let settled = false;
+        let timer = null;
+        let killTimer = null;
         const finish = (value) => {
           if (settled) return;
           settled = true;
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
+          if (killTimer) clearTimeout(killTimer);
           child?.removeAllListeners();
           resolve(value);
         };
@@ -155,9 +158,17 @@ export function runContainerAgent(
           resolve({ agent_error: `Could not start the container agent: ${err?.message ?? err}`, stderr });
           return;
         }
-        const timer = setTimeout(() => {
+        timer = setTimeout(() => {
           child.kill('SIGKILL');
           finish({ agent_error: `Container agent hung and exceeded the outer timeout of ${outerTimeoutMs} ms.`, stderr });
+        }, outerTimeoutMs);
+        // Deterministic server-side kill: `docker run` CLI kill alone does not
+        // end a wedged container (observed: CLI orphaned while the daemon kept
+        // the container). rm -f at the same deadline so the CLI can exit and
+        // the promise settles instead of hanging to the phase budget.
+        killTimer = setTimeout(() => {
+          execFn('docker', ['rm', '-f', agentName], { timeout: 15000 }).catch(() => {});
+          if (needSidecar) execFn('docker', ['rm', '-f', sname], { timeout: 15000 }).catch(() => {});
         }, outerTimeoutMs);
         child.on('error', (err) => finish({ agent_error: `Container agent error: ${err?.message ?? err}`, stderr }));
         child.on('close', () => {
@@ -219,6 +230,13 @@ export async function runCandidateContainer(
     const cname = `ac-c-${Date.now().toString(36)}-${(candidateSeq++).toString(36)}`;
     activeSandboxNames.containers.add(cname);
     const { argv, timeoutSec } = buildDockerRunArgs({ image, workspaceHostPath: workspace, entry, args, env, limits, name: cname });
+    // Deterministic server-side kill scheduled BEFORE awaiting the CLI: the
+    // exec timeout kills the CLI, but a wedged container keeps the CLI from
+    // exiting (observed: hang took 90s to the phase budget). rm -f at the
+    // container deadline lets the CLI exit so the promise settles as timeout.
+    const killTimer = setTimeout(() => {
+      execFn('docker', ['rm', '-f', cname], { timeout: 15000 }).catch(() => {});
+    }, timeoutSec * 1000);
     let result;
     try {
       const { stdout, stderr } = await execFn('docker', argv, {
@@ -238,6 +256,7 @@ export async function runCandidateContainer(
         workspace: { path: workspace, deleted: false },
       };
     }
+    clearTimeout(killTimer);
     // Deterministic server-side kill: --rm usually already removed it; if the
     // exec timeout path failed, this is what actually ends the container.
     try { await execFn('docker', ['rm', '-f', cname], { timeout: 15000 }); } catch { /* already gone */ }

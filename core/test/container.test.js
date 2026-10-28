@@ -9,6 +9,7 @@ import {
   dockerAvailable,
   runInContainer,
 } from '../src/container.js';
+import { runCandidateContainer } from '../src/container-run.js';
 
 /**
  * Container profile tests — fully offline (no daemon needed) except the last
@@ -91,6 +92,33 @@ test('unsafe container names are refused before anything runs', () => {
 test('unsafe workspace path is refused before anything runs', () => {
   assert.throws(() => buildDockerRunArgs({ ...JOB, workspaceHostPath: '/tmp/a;rm -rf /' }), /container_refused/);
   assert.throws(() => buildDockerRunArgs({ ...JOB, workspaceHostPath: '' }), /container_refused/);
+});
+
+test('sandbox image is Node 22 (executor uses --permission, unknown on Node 20)', () => {
+  assert.equal(SANDBOX_IMAGE, 'node:22-alpine');
+});
+
+test('candidate timeout is classified as timeout, never as success', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = (await import('node:path')).default;
+  const src = await mkdtemp(path.join(tmpdir(), 'ac-src-'));
+  await writeFile(path.join(src, 'app.js'), "'use strict';console.log('hi');", 'utf8');
+  try {
+    const timeoutErr = Object.assign(new Error('spawn docker ETIMEDOUT'), { killed: true, stdout: 'partial', stderr: '' });
+    const fakeExec = async (cmd, args, _opts) => {
+      if (cmd === 'docker' && args[0] === 'info') return { stdout: 'ok' };
+      if (cmd === 'docker' && args[0] === 'rm') return { stdout: '' };
+      throw timeoutErr;
+    };
+    const r = await runCandidateContainer(
+      { image: SANDBOX_IMAGE, subjectDir: src, env: {}, limits: { timeout_ms: 1000, max_memory_mb: 128, max_output_bytes: 1024 } },
+      fakeExec,
+    );
+    assert.equal(r.status, 'timeout');
+  } finally {
+    await rm(src, { recursive: true, force: true }).catch(() => {});
+  }
 });
 
 test('live-daemon negative checks (host-read / egress / key) — SKIP when no daemon', async (t) => {

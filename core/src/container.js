@@ -42,8 +42,11 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-/** Pinned candidate runtime: no project build required to run untrusted code. */
-export const SANDBOX_IMAGE = 'node:20-alpine';
+/** Pinned candidate runtime: no project build required to run untrusted code.
+ * Node 22 is required because the in-container executor uses `--permission`
+ * (Node 20 only knew `--experimental-permission`, so every condition crashed
+ * there). The tag is resolved to a digest at validation time; the digest runs. */
+export const SANDBOX_IMAGE = 'node:22-alpine';
 
 /** Secrets that must NEVER enter a candidate container. */
 export const CONTAINER_SECRET_DENYLIST = Object.freeze([
