@@ -44,6 +44,32 @@ function containerUnavailable() {
   return err;
 }
 
+/**
+ * In-flight sandbox containers/networks, for deterministic server-side kill.
+ *
+ * Client-side timeouts (execFile `timeout`, spawn timers) cannot be trusted
+ * to end a container: the container lives on the daemon and can outlive a
+ * dead CLI (observed: a `docker run` CLI orphaned for 25+ min while the
+ * script waited). Every container/network we start is named and registered
+ * here; normal completion unregisters it, and forceRemoveSandbox() rm -f's
+ * anything still registered (watchdog expiry). Names only — never secrets.
+ */
+export const activeSandboxNames = { containers: new Set(), networks: new Set() };
+
+/** Best-effort server-side termination of everything still registered. */
+export async function forceRemoveSandbox(execFn = execFileAsync) {
+  for (const name of [...activeSandboxNames.containers]) {
+    try { await execFn('docker', ['rm', '-f', name], { timeout: 15000 }); } catch { /* best-effort */ }
+    activeSandboxNames.containers.delete(name);
+  }
+  for (const name of [...activeSandboxNames.networks]) {
+    try { await execFn('docker', ['network', 'rm', name], { timeout: 15000 }); } catch { /* best-effort */ }
+    activeSandboxNames.networks.delete(name);
+  }
+}
+
+let candidateSeq = 0;
+
 async function dockerLogs(execFn, name, tail = 20) {
   try {
     const { stdout } = await execFn('docker', ['logs', '--tail', String(tail), name], { timeout: 10000 });
@@ -76,8 +102,12 @@ export function runContainerAgent(
   return (async () => {
     if (!(await dockerAvailable(execFn))) throw containerUnavailable();
     const runId = job.runId;
-    const net = network ?? `acn-${runId}`.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
+    const net = (network ?? `acn-${runId}`).replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
     const sname = `${sidecarName}-${runId}`.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
+    // Named so a wedged run can be killed server-side (see forceRemoveSandbox).
+    const agentName = `aca-${runId}`.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
+    activeSandboxNames.containers.add(agentName);
+    activeSandboxNames.networks.add(net);
     // Baseline conditions (A, C) withhold the resource by design, so no
     // sidecar is started for them — only substituted conditions (B, D) carry
     // a resourceProfile. Passing the null baseline profile into the sidecar
@@ -103,8 +133,10 @@ export function runContainerAgent(
         }
         sidecarAddress = sidecarUrl(sname);
       }
+      if (needSidecar) activeSandboxNames.containers.add(sname);
+      cleanup.push(['docker', ['rm', '-f', agentName]]);
       const containerJob = { ...job, subjectDir: '/subject', ...(sidecarAddress ? { externalResourceUrl: sidecarAddress } : {}) };
-      const argv = buildAgentArgs({ image, network: net, coreDir, subjectDir: job.subjectDir, env: {} });
+      const argv = buildAgentArgs({ image, network: net, coreDir, subjectDir: job.subjectDir, env: {}, name: agentName });
       return await new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
@@ -157,6 +189,9 @@ export function runContainerAgent(
           await execFn(cmd, args, { timeout: 15000 });
         } catch { /* best-effort cleanup; the failure is already recorded */ }
       }
+      activeSandboxNames.containers.delete(agentName);
+      if (needSidecar) activeSandboxNames.containers.delete(sname);
+      activeSandboxNames.networks.delete(net);
     }
   })();
 }
@@ -179,16 +214,21 @@ export async function runCandidateContainer(
     // (observed on the runner as status=crash on every mounted probe).
     // The workspace holds only a copy of the candidate code — never secrets.
     await execFileAsync('chmod', ['-R', 'a+rwX', workspace], { timeout: 10000 });
-    const { argv, timeoutSec } = buildDockerRunArgs({ image, workspaceHostPath: workspace, entry, args, env, limits });
+    // Named so a wedged run can be killed server-side even if the exec
+    // timeout path itself fails (observed: orphaned `docker run` CLI).
+    const cname = `ac-c-${Date.now().toString(36)}-${(candidateSeq++).toString(36)}`;
+    activeSandboxNames.containers.add(cname);
+    const { argv, timeoutSec } = buildDockerRunArgs({ image, workspaceHostPath: workspace, entry, args, env, limits, name: cname });
+    let result;
     try {
       const { stdout, stderr } = await execFn('docker', argv, {
         timeout: timeoutSec * 1000 + 5000,
         maxBuffer: 1024 * 1024,
       });
-      return { status: 'completed', exit_code: 0, signal: null, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), error: null, workspace: { path: workspace, deleted: false } };
+      result = { status: 'completed', exit_code: 0, signal: null, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), error: null, workspace: { path: workspace, deleted: false } };
     } catch (err) {
       const killed = err?.killed || /timed out|timeout/i.test(String(err?.message ?? ''));
-      return {
+      result = {
         status: killed ? 'timeout' : 'crash',
         exit_code: typeof err?.code === 'number' ? err.code : null,
         signal: err?.signal ?? null,
@@ -198,6 +238,11 @@ export async function runCandidateContainer(
         workspace: { path: workspace, deleted: false },
       };
     }
+    // Deterministic server-side kill: --rm usually already removed it; if the
+    // exec timeout path failed, this is what actually ends the container.
+    try { await execFn('docker', ['rm', '-f', cname], { timeout: 15000 }); } catch { /* already gone */ }
+    activeSandboxNames.containers.delete(cname);
+    return result;
   } finally {
     await rm(workspace, { recursive: true, force: true }).catch(() => {});
   }

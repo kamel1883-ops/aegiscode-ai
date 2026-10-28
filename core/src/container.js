@@ -109,13 +109,18 @@ export function buildDockerRunArgs({
   args = ['serve'],
   env = {},
   limits = {},
+  name = null,
 } = {}) {
   if (!workspaceHostPath || !HOST_PATH_RE.test(workspaceHostPath)) {
     throw new Error('container_refused: workspace host path is missing or unsafe');
   }
+  if (name !== null && name !== undefined && !NAME_RE.test(name)) {
+    throw new Error('container_refused: unsafe container name');
+  }
   const timeoutSec = Math.max(1, Math.ceil((limits.timeout_ms ?? 5000) / 1000));
   const argv = [
     'run', '--rm',
+    ...(name ? ['--name', name] : []),
     '--network', 'none',
     ...containerBaseFlags(),
     '-v', `${workspaceHostPath}:/work:rw`,
@@ -157,12 +162,16 @@ export function buildSidecarArgs({ image = SANDBOX_IMAGE, network, name = SIDECA
 }
 
 /** Candidate container on the isolated network mounting core + subject read-only. */
-export function buildAgentArgs({ image = SANDBOX_IMAGE, network, coreDir, subjectDir, env = {} }) {
+export function buildAgentArgs({ image = SANDBOX_IMAGE, network, coreDir, subjectDir, env = {}, name = null }) {
   if (!network || !NAME_RE.test(network)) throw new Error('container_refused: unsafe network name');
   if (!coreDir || !HOST_PATH_RE.test(coreDir)) throw new Error('container_refused: unsafe core mount');
   if (!subjectDir || !HOST_PATH_RE.test(subjectDir)) throw new Error('container_refused: unsafe subject mount');
+  if (name !== null && name !== undefined && !NAME_RE.test(name)) {
+    throw new Error('container_refused: unsafe container name');
+  }
   const argv = [
     'run', '--rm', '-i',
+    ...(name ? ['--name', name] : []),
     '--network', network,
     ...containerBaseFlags(),
     '-v', `${coreDir}:/app-core:ro`,

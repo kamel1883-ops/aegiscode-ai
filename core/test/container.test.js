@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   SANDBOX_IMAGE,
   CONTAINER_SECRET_DENYLIST,
+  buildAgentArgs,
   buildDockerRunArgs,
   dockerAvailable,
   runInContainer,
@@ -69,6 +70,22 @@ test('fail-closed: no daemon ⇒ refusal, never silent fallback', async () => {
   const dead = async () => { const e = new Error('connect ENOENT /var/run/docker.sock'); e.code = 'ENOENT'; throw e; };
   assert.equal(await dockerAvailable(dead), false);
   await assert.rejects(() => runInContainer(JOB, dead), /container_unavailable|Docker daemon unreachable/);
+});
+
+test('named containers can be addressed for deterministic server-side kill', () => {
+  const { argv } = buildDockerRunArgs({ workspaceHostPath: '/tmp/ac-work-123', name: 'ac-c-m1a2b3' });
+  const n = argv.indexOf('--name');
+  assert.notEqual(n, -1);
+  assert.equal(argv[n + 1], 'ac-c-m1a2b3');
+  const agent = buildAgentArgs({ network: 'acn-test', coreDir: '/app-core', subjectDir: '/subject', name: 'aca-test' });
+  const m = agent.indexOf('--name');
+  assert.notEqual(m, -1);
+  assert.equal(agent[m + 1], 'aca-test');
+});
+
+test('unsafe container names are refused before anything runs', () => {
+  assert.throws(() => buildDockerRunArgs({ workspaceHostPath: '/tmp/ac-work-123', name: 'ac;rm -rf /' }), /container_refused/);
+  assert.throws(() => buildAgentArgs({ network: 'acn-test', coreDir: '/app-core', subjectDir: '/subject', name: 'ac evil' }), /container_refused/);
 });
 
 test('unsafe workspace path is refused before anything runs', () => {

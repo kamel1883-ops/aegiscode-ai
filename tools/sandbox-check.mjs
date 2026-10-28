@@ -45,6 +45,29 @@ function check(name, ok, detail = '') {
   return ok;
 }
 
+/**
+ * Bounds a phase that must end even if the transport wedges: on expiry the
+ * race rejects, forceRemoveSandbox() rm -f's the named containers so their
+ * docker CLIs exit and the underlying promises settle, the failure is
+ * recorded, and the script proceeds to write its report. The noop catch on
+ * the loser prevents an unhandled-rejection crash after the race settles.
+ */
+async function withPhaseBudget(label, ms, fn, kill) {
+  const pending = fn();
+  pending.catch(() => {});
+  try {
+    return await Promise.race([
+      pending,
+      new Promise((_, reject) => setTimeout(() => reject(Object.assign(
+        new Error(`${label}: phase_timeout after ${ms}ms — forced server-side cleanup, see detail`),
+        { code: 'phase_timeout' })), ms)),
+    ]);
+  } catch (err) {
+    if (err?.code === 'phase_timeout' && kill) { try { await kill(); } catch { /* best-effort */ } }
+    throw err;
+  }
+}
+
 async function main() {
   for (const s of SECRET_NAMES) {
     if (process.env[s]) {
@@ -57,7 +80,7 @@ async function main() {
   await mkdir(outDir, { recursive: true });
 
   const { dockerAvailable } = await import('../core/src/container.js');
-  const { runCandidateContainer } = await import('../core/src/container-run.js');
+  const { runCandidateContainer, forceRemoveSandbox } = await import('../core/src/container-run.js');
   const hasDaemon = await dockerAvailable();
   if (!check('docker daemon reachable', hasDaemon, hasDaemon ? 'daemon answers' : 'no daemon: cannot validate')) {
     await writeFile(path.join(outDir, 'sandbox-report.json'), JSON.stringify({ image, checks, verdict: 'cannot_validate_no_daemon' }, null, 2));
@@ -159,10 +182,17 @@ async function main() {
     const r = await runCandidateContainer({ image: pinned, subjectDir: FIX('env-leak'), env: { META_API_KEY: 'FAKE_MUST_NOT_PASS', AEGISCODE_API_TOKENS: 'FAKE_TOK' }, limits: LIMITS });
     check('no credentials in candidate', /AC::LEAKED:NONE/.test(r.stdout) && !r.stdout.includes('FAKE_MUST_NOT_PASS'), `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
   }
-  // 6. Resource termination.
+  // 6. Resource termination (bounded: the hang fixture never exits by itself).
   {
-    const r = await runCandidateContainer({ image: pinned, subjectDir: FIX('hang'), env: {}, limits: LIMITS });
-    check('hang terminated as timeout', r.status === 'timeout', `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
+    let r = null;
+    try {
+      r = await withPhaseBudget('hang-probe', 90_000,
+        () => runCandidateContainer({ image: pinned, subjectDir: FIX('hang'), env: {}, limits: LIMITS }),
+        () => forceRemoveSandbox());
+    } catch (err) {
+      check('hang probe ends within its phase budget', false, String(err?.message ?? err).slice(0, 200));
+    }
+    if (r) check('hang terminated as timeout', r.status === 'timeout', `status=${r.status} ${(r.stderr ?? '').slice(0, 200)}`);
   }
   // 7. Real matrix in container mode (sidecar + gate + functional probes isolated; verdict on host).
   {
@@ -178,12 +208,16 @@ async function main() {
     let real = null;
     let fake = null;
     try {
-    real = await verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchReal });
+    real = await withPhaseBudget('matrix-real-verify', 480_000,
+      () => verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchReal }),
+      () => forceRemoveSandbox());
     check('container matrix: real patch ⇒ patch_supported', real.ok && real.verdict === 'patch_supported', real.report?.reason ?? real.verdict);
-    fake = await verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchFake });
+    fake = await withPhaseBudget('matrix-fake-verify', 480_000,
+      () => verify(scenario, { original: FIXTURES.original, patched: FIXTURES.patchFake }),
+      () => forceRemoveSandbox());
     check('container matrix: fake patch ⇒ environment_masked', fake?.ok && fake?.verdict === 'environment_masked', fake?.report?.reason ?? fake?.verdict);
     } catch (err) {
-      check('container matrix completes without transport crash', false, String(err?.message ?? err).slice(0, 300));
+      check('container matrix completes (no transport crash or phase timeout)', false, String(err?.message ?? err).slice(0, 300));
     }
     if (real && fake) {
     const d = real.report?.conditions?.find?.((c) => c.condition === 'D');
