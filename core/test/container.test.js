@@ -121,6 +121,35 @@ test('candidate timeout is classified as timeout, never as success', async () =>
   }
 });
 
+test('server-side kill classifies a wedged container as timeout, not crash', async () => {
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = (await import('node:path')).default;
+  const src = await mkdtemp(path.join(tmpdir(), 'ac-src-'));
+  await writeFile(path.join(src, 'app.js'), "'use strict';setInterval(()=>{},1000);", 'utf8');
+  try {
+    // Wedged run: the CLI never settles on its own; the test double rejects
+    // only after the server-side kill deadline with a plain removal error
+    // (no killed flag, no timeout wording) — the transport must still
+    // report timeout because it performed the server-side kill.
+    const fakeExec = async (cmd, args, _opts) => {
+      if (cmd === 'docker' && args[0] === 'info') return { stdout: 'ok' };
+      if (cmd === 'docker' && args[0] === 'rm') return { stdout: '' };
+      await new Promise((r) => setTimeout(r, 1200));
+      const e = new Error('Error response from daemon: container removed');
+      e.code = 125;
+      throw e;
+    };
+    const r = await runCandidateContainer(
+      { image: SANDBOX_IMAGE, subjectDir: src, env: {}, limits: { timeout_ms: 1000, max_memory_mb: 128, max_output_bytes: 1024 } },
+      fakeExec,
+    );
+    assert.equal(r.status, 'timeout');
+  } finally {
+    await rm(src, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
 test('live-daemon negative checks (host-read / egress / key) — SKIP when no daemon', async (t) => {
   if (!(await dockerAvailable())) {
     t.skip('no Docker daemon in this environment — live container checks not run, not passed');

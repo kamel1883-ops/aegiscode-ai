@@ -234,7 +234,13 @@ export async function runCandidateContainer(
     // exec timeout kills the CLI, but a wedged container keeps the CLI from
     // exiting (observed: hang took 90s to the phase budget). rm -f at the
     // container deadline lets the CLI exit so the promise settles as timeout.
+    // When this server-side kill fires first, the CLI exits with a removal
+    // error rather than an exec-timeout kill — that is still a termination
+    // (timeout), never a crash: without the kill the container would run
+    // forever (observed: hang classified crash instead of timeout on run #7).
+    let serverKilled = false;
     const killTimer = setTimeout(() => {
+      serverKilled = true;
       execFn('docker', ['rm', '-f', cname], { timeout: 15000 }).catch(() => {});
     }, timeoutSec * 1000);
     let result;
@@ -245,11 +251,11 @@ export async function runCandidateContainer(
       });
       result = { status: 'completed', exit_code: 0, signal: null, stdout: String(stdout ?? ''), stderr: String(stderr ?? ''), error: null, workspace: { path: workspace, deleted: false } };
     } catch (err) {
-      const killed = err?.killed || /timed out|timeout/i.test(String(err?.message ?? ''));
+      const killed = err?.killed || serverKilled || /timed out|timeout/i.test(String(err?.message ?? ''));
       result = {
         status: killed ? 'timeout' : 'crash',
-        exit_code: typeof err?.code === 'number' ? err.code : null,
-        signal: err?.signal ?? null,
+        exit_code: killed ? null : (typeof err?.code === 'number' ? err.code : null),
+        signal: killed ? 'SIGKILL' : (err?.signal ?? null),
         stdout: String(err?.stdout ?? ''),
         stderr: String(err?.stderr ?? ''),
         error: String(err?.message ?? err),
