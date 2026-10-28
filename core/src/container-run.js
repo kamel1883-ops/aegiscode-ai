@@ -32,6 +32,7 @@ import {
   buildSidecarArgs,
   buildAgentArgs,
   buildDockerRunArgs,
+  buildIsolatedProbeArgs,
   dockerAvailable,
 } from './container.js';
 
@@ -196,12 +197,20 @@ export function runContainerAgent(
         child.stdin.end();
       });
       // Execution evidence captured BEFORE cleanup removes the network:
-      // the daemon's own record (id + labels) for this run_id. Best-effort:
-      // null when the daemon is already unreachable — never fabricated.
+      // the daemon's own record (id, Internal flag, labels, attached
+      // containers) plus one external-fetch probe on this exact network.
       // (--rm containers are already gone at this point, so the persistent
       // network record is the inspectable object; per-condition agent
       // results with run_id remain the primary execution proof.)
-      return { ...outcome, container_evidence: await inspectNetworkEvidence(execFn, net) };
+      // Fail-closed: an EGRESS_OPEN probe means the `--internal` boundary
+      // did not hold — the result is discarded as an infra error, never a
+      // candidate verdict.
+      const netEvidence = await inspectNetworkEvidence(execFn, net);
+      const egress = await probeExternalEgress(execFn, { image, network: net });
+      if (egress.checked && egress.blocked === false) {
+        return { agent_error: 'Egress probe succeeded on an --internal network: isolation violated, result discarded.', stderr, container_evidence: { ...netEvidence, egress } };
+      }
+      return { ...outcome, container_evidence: { ...netEvidence, egress } };
     } finally {
       for (const [cmd, args] of cleanup.reverse()) {
         try {
@@ -216,18 +225,53 @@ export function runContainerAgent(
 }
 
 /**
- * Best-effort daemon record of the per-run isolated network (id + labels).
- * Only identifiers — no env, no mounts, no secrets are ever collected.
+ * Best-effort daemon record of the per-run isolated network (id, Internal
+ * flag, labels, attached containers). Only identifiers — no env, no mounts,
+ * no secrets are ever collected. On failure the reason is RECORDED (as
+ * inspect_error), never swallowed into a bare null: a missing record must
+ * be diagnosable, not mysterious.
  */
-async function inspectNetworkEvidence(execFn, net) {
+export async function inspectNetworkEvidence(execFn, net) {
   try {
     const { stdout } = await execFn('docker', ['network', 'inspect', net], { timeout: 10000 });
     const parsed = JSON.parse(String(stdout ?? ''));
     const n0 = Array.isArray(parsed) ? parsed[0] : parsed;
-    if (!n0) return null;
-    return { network_id: n0.Id ?? null, network_name: n0.Name ?? net, labels: n0.Labels ?? null };
-  } catch {
-    return null;
+    if (!n0) return { network_name: net, labels: null, inspect_error: 'empty inspect result' };
+    const attached = n0.Containers && typeof n0.Containers === 'object'
+      ? Object.values(n0.Containers).map((c) => c?.Name ?? null).filter(Boolean)
+      : [];
+    return {
+      network_id: n0.Id ?? null,
+      network_name: n0.Name ?? net,
+      internal: n0.Internal ?? null,
+      labels: n0.Labels ?? null,
+      attached,
+    };
+  } catch (err) {
+    return { network_name: net, labels: null, inspect_error: String(err?.message ?? err).slice(0, 300) };
+  }
+}
+
+/** External-fetch probe: must FAIL on an `--internal` network. Short, fixed,
+ * no subject content involved. */
+export const EGRESS_PROBE_SCRIPT = "fetch('http://example.com/',{signal:AbortSignal.timeout(4000)}).then(async r=>{console.log('EGRESS_OPEN:'+r.status);}).catch(e=>{console.log('EGRESS_BLOCKED:'+String((e&&e.message)||e).slice(0,120));});";
+
+/** Parses probe output into blocked:true/false/null(unknown). Pure — unit-tested. */
+export function parseEgressOutput(out) {
+  const text = String(out ?? '');
+  if (text.includes('EGRESS_OPEN')) return { checked: true, blocked: false, detail: text.trim().slice(0, 200) };
+  if (text.includes('EGRESS_BLOCKED')) return { checked: true, blocked: true, detail: text.trim().slice(0, 200) };
+  return { checked: true, blocked: null, detail: 'unrecognized probe output: ' + text.trim().slice(0, 200) };
+}
+
+/** Runs one external-fetch probe on the condition network, BEFORE cleanup.
+ * A failed probe container means evidence unknown — never success. */
+export async function probeExternalEgress(execFn, { image, network }) {
+  try {
+    const { stdout } = await execFn('docker', buildIsolatedProbeArgs({ image, network, script: EGRESS_PROBE_SCRIPT }), { timeout: 20000, maxBuffer: 256 * 1024 });
+    return parseEgressOutput(stdout);
+  } catch (err) {
+    return { checked: false, blocked: null, detail: String(err?.message ?? err).slice(0, 200) };
   }
 }
 

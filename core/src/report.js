@@ -231,15 +231,26 @@ function renderMarkdown(report) {
     // condition ran in its own daemon-created `--internal` Docker network.
     // Describe the executed setup from per-condition evidence instead.
     lines.push('**Container networks (per condition, `--internal`, daemon-recorded):**');
+    let netComplete = true;
     for (const c of report.conditions) {
       const cont = c.isolation?.containers;
       const ev = c.container_evidence;
-      const netRef = cont?.network ? `\`${cont.network}\`` : '—';
-      const evRef = ev?.network_id ? ` (daemon id \`${ev.network_id}\`, labels recorded)` : ' (inspect not recorded — proof incomplete)';
-      const agentRef = cont?.agent ? ` · agent \`${cont.agent}\`` : '';
-      const sideRef = cont?.sidecar ? ` · sidecar \`${cont.sidecar}\`` : '';
-      lines.push(`- Condition ${c.condition}: network ${netRef}${evRef}${agentRef}${sideRef}`);
+      const bits = ['network `' + (cont?.network ?? '—') + '`'];
+      if (ev?.network_id) bits.push('daemon id `' + ev.network_id + '`');
+      else { bits.push('inspect not recorded' + (ev?.inspect_error ? ' (' + ev.inspect_error + ')' : '')); netComplete = false; }
+      if (ev?.internal === true) bits.push('internal: true');
+      else if (ev?.internal === false) { bits.push('internal: FALSE — VIOLATION'); netComplete = false; }
+      if (ev?.attached?.length) bits.push('attached: ' + ev.attached.map((n) => '`' + n + '`').join(', '));
+      if (cont?.agent) bits.push('agent `' + cont.agent + '`');
+      if (cont?.sidecar) bits.push('sidecar `' + cont.sidecar + '`');
+      if (ev?.egress?.checked && ev.egress.blocked === true) bits.push('egress probe: blocked');
+      else if (ev?.egress && ev.egress.blocked === false) { bits.push('egress probe: OPEN — ISOLATION VIOLATED'); netComplete = false; }
+      else { bits.push('egress probe: ' + (ev?.egress?.checked === false ? 'not run' : 'unknown')); netComplete = false; }
+      lines.push('- Condition ' + c.condition + ': ' + bits.join(' · '));
     }
+    lines.push(netComplete
+      ? '**Network isolation evidence: COMPLETE for this run** — internal daemon networks, labeled attachments, and a blocked external-fetch probe on every condition network.'
+      : '**Network isolation evidence: INCOMPLETE** — see per-condition notes above; complete isolation is not claimed.');
     lines.push('**Host network namespace:** not available in this environment (host coordinator only — conditions above ran in the isolated Docker networks, not on the host).');
   } else {
     lines.push(`**Network isolation:** ${report.isolation.network_namespace === 'none' ? 'not available in this environment' : report.isolation.network_namespace}`);
