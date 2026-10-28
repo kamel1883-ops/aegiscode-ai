@@ -50,13 +50,22 @@ jobs:
         with:
           node-version: 22
       - name: builder unit tests (offline, no daemon needed)
-        run: node --test core/test/container.test.js core/test/isolation.test.js
+        run: node --test core/test/container.test.js core/test/isolation.test.js 2>&1 | tee builder-tests.log; test ${PIPESTATUS[0]} -eq 0
       - name: run sandbox checks
         run: node tools/sandbox-check.mjs --out sandbox-out --image "${{ inputs.image }}"
+      - name: upload builder test log (always, even on failure)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: builder-tests-log
+          path: builder-tests.log
+          if-no-files-found: warn
+          retention-days: 90
       - name: upload sandbox report (always, even on failure)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sandbox-report
           path: sandbox-out
+          if-no-files-found: warn
           retention-days: 90
