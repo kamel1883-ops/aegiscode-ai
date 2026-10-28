@@ -292,6 +292,18 @@ async function openReport(id) {
   const banner = $('verdict-banner');
   banner.className = `verdict ${report.verdict}`;
   banner.textContent = VERDICT_LABELS[report.verdict] ?? report.verdict;
+  const sandbox = report.isolation ?? {};
+  const sandboxLine = $('sandbox-line');
+  if (sandboxLine) {
+    const parts = [
+      `SANDBOX: ${sandbox.sandbox ?? 'process'}${sandbox.strict_container ? ' (strict require-container)' : ''}`,
+      `image: ${sandbox.sandbox_image ?? 'n/a'}`,
+      `image ID (daemon): ${sandbox.sandbox_image_id ?? 'n/a — proof incomplete'}`,
+    ];
+    if (sandbox.job_id) parts.push(`job: ${sandbox.job_id}`);
+    if (sandbox.sandbox_image_digest_env != null) parts.push(`supplied digest (UNVERIFIED): ${sandbox.sandbox_image_digest_env}`);
+    sandboxLine.textContent = parts.join(' · ');
+  }
 
   // The four-condition matrix — cells are built with textContent, never with
   // innerHTML, so nothing server-sourced is ever interpreted as markup.

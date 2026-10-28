@@ -220,16 +220,24 @@ function renderMarkdown(report) {
 
   lines.push('## Execution isolation and workspaces');
   lines.push('');
+  lines.push(`**Sandbox:** \`${report.isolation.sandbox ?? 'process'}\`${report.isolation.strict_container ? ' (strict require-container)' : ''} · **Image:** \`${report.isolation.sandbox_image ?? 'n/a'}\` · **Image ID (daemon inspect, not a registry RepoDigest):** \`${report.isolation.sandbox_image_id ?? 'n/a — proof incomplete'}\`${report.isolation.job_id ? ` · **Job:** \`${report.isolation.job_id}\`` : ''}`);
+  if (report.isolation.sandbox_image_digest_env != null) {
+    lines.push(`**Supplied digest (env, UNVERIFIED — not proof of what ran):** \`${report.isolation.sandbox_image_digest_env}\``);
+  }
+  lines.push('');
   lines.push(`**Network isolation:** ${report.isolation.network_namespace === 'none' ? 'not available in this environment' : report.isolation.network_namespace}`);
   if (report.isolation.fallback_reason) {
     lines.push('');
     lines.push(`*Reason it is not active:* ${report.isolation.fallback_reason}`);
   }
   lines.push('');
-  lines.push('| Condition | Agent PID | Subject PID | Workspace deleted |');
-  lines.push('|---|---|---|---|');
+  lines.push('| Condition | Agent PID | Subject PID | Workspace deleted | Container |');
+  lines.push('|---|---|---|---|---|');
   for (const r of report.executor.conditions) {
-    lines.push(`| ${r.condition} | ${r.runner_pid ?? '—'} | ${r.subject_pid ?? '—'} | ${r.workspace_deleted === true ? 'yes' : r.workspace_deleted === null ? '—' : '**no**'} |`);
+    const c = report.conditions.find((x) => x.condition === r.condition);
+    const cont = c?.isolation?.containers;
+    const contRef = cont ? `\`${cont.agent ?? '—'}\`` : '—';
+    lines.push(`| ${r.condition} | ${r.runner_pid ?? '—'} | ${r.subject_pid ?? '—'} | ${r.workspace_deleted === true ? 'yes' : r.workspace_deleted === null ? '—' : '**no**'} | ${contRef} |`);
   }
   lines.push('');
 

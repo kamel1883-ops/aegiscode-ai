@@ -133,17 +133,19 @@ export class Queue {
       originalDir = await materialize(original);
       patchedDir = await materialize(patched);
 
-      const result = await this.verifyFn(scenario, { original: originalDir, patched: patchedDir });
+      const result = await this.verifyFn(scenario, { original: originalDir, patched: patchedDir }, { jobId });
 
       if (!result.ok) {
-        // A broken scenario: rejected before any verdict — and the rejection
-        // is documented.
+        // A broken scenario OR an infrastructure refusal (unknown sandbox,
+        // no daemon in require-container): rejected before any verdict —
+        // and the rejection is documented. Never falls back to process.
+        const infra = result.infra_refused === true;
         await this.store.updateJob(jobId, {
           status: 'rejected',
           finished_at: new Date().toISOString(),
           errors: result.errors,
         });
-        await this.store.record('job.rejected_scenario', jobId, { errors: result.errors });
+        await this.store.record(infra ? 'job.rejected_infra' : 'job.rejected_scenario', jobId, { errors: result.errors });
         return;
       }
 
@@ -158,12 +160,17 @@ export class Queue {
       });
       await this.store.record('job.completed', jobId, { verdict: result.verdict });
     } catch (err) {
+      // A thrown infrastructure refusal is also a rejection, not a silent
+      // fallback and not a candidate crash. Candidate crashes/timeouts are
+      // returned inside the report (status crash/timeout), never thrown.
+      const msg = String(err?.message ?? err);
+      const infra = msg.startsWith('sandbox_refused') || err?.code === 'container_unavailable';
       await this.store.updateJob(jobId, {
-        status: 'failed',
+        status: infra ? 'rejected' : 'failed',
         finished_at: new Date().toISOString(),
-        errors: [String(err?.message ?? err)],
+        errors: [msg],
       });
-      await this.store.record('job.failed', jobId, { error: String(err?.message ?? err) });
+      await this.store.record(infra ? 'job.rejected_infra' : 'job.failed', jobId, { error: msg });
     } finally {
       // Temporary workspaces are deleted in every case: no trace remains and
       // no real repository is ever touched.

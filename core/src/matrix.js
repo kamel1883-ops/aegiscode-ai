@@ -115,7 +115,7 @@ function runAgent({ job, prefix, outerTimeoutMs }) {
 
 /** Projects an agent result into a trial with observation + condition records. */
 function trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, attempts }) {
-  const { result, agent_error: agentError, stderr } = agentOut;
+  const { result, agent_error: agentError, stderr, container_evidence: containerEvidence } = agentOut;
 
   if (!result) {
     // An agent failure is an environment setup error — not a test failure and not a success.
@@ -132,6 +132,7 @@ function trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, a
         environment: condition.environment,
         subject_dir: subjectDir,
         run_id: runId,
+        container_evidence: containerEvidence ?? null,
         exit_code: null,
         signal: null,
         duration_ms: 0,
@@ -259,23 +260,57 @@ async function runComputedProbes({ subjectDir, limits, count, runSubject }) {
  * @param {{original:string, patched:string}} params.subjects paths to the two codebases
  * @returns {Promise<{observations:object, conditions:object, isolation:object}>}
  */
-export async function runMatrix({ scenario, subjects }) {
+export async function runMatrix({ scenario, subjects, jobId = null, transports = null }) {
   const limits = scenario.resource_limits;
   const isolation = await detectNetworkIsolation();
   // Transport selection: default is the process agent under an optional
   // network namespace. AC_SANDBOX=container selects the Docker transport
-  // (per-run --internal network + sidecar); anything else refuses loudly.
-  // The default path is byte-for-byte the proven behavior.
-  const sandboxMode = process.env.AC_SANDBOX === 'container' ? 'container' : 'process';
+  // (per-run --internal network + sidecar). AC_SANDBOX=require-container
+  // is the strict UI path: Docker must work or the job is refused — the
+  // matrix never falls back to process silently. Anything else refuses.
+  const rawSandbox = process.env.AC_SANDBOX ?? 'process';
+  if (rawSandbox !== 'process' && rawSandbox !== 'container' && rawSandbox !== 'require-container') {
+    throw new Error(`sandbox_refused: unknown AC_SANDBOX=${rawSandbox}`);
+  }
+  const sandboxMode = rawSandbox === 'process' ? 'process' : 'container';
+  const strictContainer = rawSandbox === 'require-container';
   const sandboxImage = process.env.AC_SANDBOX_IMAGE || SANDBOX_IMAGE;
-  let runContainerAgent = null;
-  let runCandidateContainer = null;
-  if (sandboxMode === 'container') {
+  // Dependency injection for deterministic tests: transports.containerAgent /
+  // transports.containerCandidate replace the Docker transport, and
+  // transports.processAgent replaces the process agent (spy: must stay at
+  // zero calls in strict container mode). Production passes nothing.
+  let runContainerAgent = transports?.containerAgent ?? null;
+  let runCandidateContainer = transports?.containerCandidate ?? null;
+  if (sandboxMode === 'container' && !runContainerAgent) {
     ({ runContainerAgent, runCandidateContainer } = await import('./container-run.js'));
   }
   const coreDir = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   const observations = {};
   const conditions = {};
+  const safeJob = typeof jobId === 'string' && jobId !== ''
+    ? jobId.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 40)
+    : 'nojob';
+  // Image identity, honestly separated:
+  // - sandboxImageId: the daemon's LOCAL image ID (`docker image inspect
+  //   --format {{.Id}}`) for the exact image string this run uses. This is
+  //   NOT a registry RepoDigest — a local content ID and a registry digest
+  //   are different objects with different trust properties and must never
+  //   share a label.
+  // - sandboxImageDigestEnv: a caller-supplied AC_SANDBOX_IMAGE_DIGEST value.
+  //   Recorded for traceability but explicitly UNVERIFIED — the mere presence
+  //   of an env var proves nothing about what actually ran.
+  let sandboxImageId = null;
+  const sandboxImageDigestEnv = sandboxMode === 'container' ? (process.env.AC_SANDBOX_IMAGE_DIGEST ?? null) : null;
+  if (sandboxMode === 'container') {
+    try {
+      const { execFile } = await import('node:child_process');
+      const { promisify } = await import('node:util');
+      const execFileAsync = promisify(execFile);
+      const { stdout } = await execFileAsync('docker', ['image', 'inspect', '--format', '{{.Id}}', sandboxImage], { timeout: 15000 });
+      const id = String(stdout ?? '').trim();
+      if (id) sandboxImageId = id;
+    } catch { /* stays null; the run records image + names, proof incomplete */ }
+  }
 
   // Outer agent deadline: the task enforces timeout_ms internally; this also
   // covers resource startup + the gate + cleanup.
@@ -295,12 +330,27 @@ export async function runMatrix({ scenario, subjects }) {
     let trial = null;
     let attempts = 0;
     let lastRunId = null;
+    let lastContainers = null;
 
     // Retry on execution failure only, within the scenario's attempt ceiling.
+    // In strict container mode an infrastructure failure (agent_error /
+    // container_unavailable) is never retried as process and never masked
+    // as a candidate crash: it stays status=error and fails the job openly.
     for (let attempt = 1; attempt <= scenario.maximum_attempts; attempt += 1) {
       attempts = attempt;
-      const runId = `ac-${condition.key}-${Date.now()}-${attempt}`;
+      const runId = `ac-${safeJob}-${condition.key}-${Date.now().toString(36)}-${attempt}`.replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 60);
       lastRunId = runId;
+      const labels = sandboxMode === 'container'
+        ? { 'ac.job': safeJob, 'ac.condition': condition.key, 'ac.run': runId }
+        : {};
+      if (sandboxMode === 'container') {
+        lastContainers = {
+          network: `acn-${runId}`,
+          agent: `aca-${runId}`,
+          sidecar: substituted ? `acr-${runId}` : null,
+          labels,
+        };
+      }
 
       const job = {
         runId,
@@ -313,11 +363,22 @@ export async function runMatrix({ scenario, subjects }) {
         label: `${scenario.id}:${condition.key}`,
         resourceProfile: substituted ? scenario.synthetic_resource_profile : null,
         validityChecks: substituted ? scenario.intervention_validity_checks : null,
+        ...(sandboxMode === 'container' ? { labels, jobId: safeJob } : {}),
       };
 
-      const agentOut = sandboxMode === 'container'
-        ? await runContainerAgent({ job, image: sandboxImage, coreDir, outerTimeoutMs })
-        : await runAgent({ job, prefix: isolation.prefix, outerTimeoutMs });
+      let agentOut;
+      if (sandboxMode === 'container') {
+        try {
+          agentOut = await runContainerAgent({ job, image: sandboxImage, coreDir, outerTimeoutMs });
+        } catch (err) {
+          agentOut = { agent_error: String(err?.message ?? err), stderr: '', container_unavailable: err?.code === 'container_unavailable' };
+          trial = trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, attempts });
+          break;
+        }
+      } else {
+        const processAgent = transports?.processAgent ?? runAgent;
+        agentOut = await processAgent({ job, prefix: isolation.prefix, outerTimeoutMs });
+      }
       trial = trialFromAgent({ condition, subjectDir, runId, substituted, agentOut, attempts });
 
       // As long as the gate failed, retrying is legitimate (the resource may not
@@ -327,6 +388,12 @@ export async function runMatrix({ scenario, subjects }) {
       if (trial.observation.status === 'completed' && gateOk) break;
     }
     console.error(`[ac-matrix] condition ${condition.key} done status=${trial.observation.status} gate=${substituted ? trial.observation.intervention_valid : 'n/a'} attempts=${attempts}`);
+    if (strictContainer && trial?.condition?.error != null
+      && /container_unavailable|Docker daemon unreachable|sandbox_refused/.test(String(trial.condition.error))) {
+      const err = new Error(String(trial.condition.error));
+      err.code = 'container_unavailable';
+      throw err;
+    }
 
     const stdoutExcerpt = trial.condition.stdout_excerpt ?? '';
     const recurred = readObservation(stdoutExcerpt, scenario.unsafe_event);
@@ -366,7 +433,7 @@ export async function runMatrix({ scenario, subjects }) {
           subjectDir,
           limits,
           count: 2,
-          ...(sandboxMode === 'container'
+          ...(sandboxMode === 'container' && runCandidateContainer
             ? { runSubject: (params) => runCandidateContainer({ image: sandboxImage, ...params }) }
             : {}),
         });
@@ -407,8 +474,13 @@ export async function runMatrix({ scenario, subjects }) {
         network_namespace: isolation.network_namespace,
         fallback_reason: isolation.fallback_reason,
         sandbox: sandboxMode,
+        strict_container: strictContainer,
         sandbox_image: sandboxMode === 'container' ? sandboxImage : null,
-        sandbox_image_digest: sandboxMode === 'container' ? (process.env.AC_SANDBOX_IMAGE_DIGEST ?? null) : null,
+        sandbox_image_id: sandboxMode === 'container' ? sandboxImageId : null,
+        sandbox_image_id_source: sandboxMode === 'container' ? (sandboxImageId ? 'docker-inspect-id' : null) : null,
+        sandbox_image_digest_env: sandboxMode === 'container' ? sandboxImageDigestEnv : null,
+        sandbox_image_digest_env_verified: false,
+        containers: sandboxMode === 'container' ? lastContainers : null,
       },
     };
   }
@@ -420,8 +492,13 @@ export async function runMatrix({ scenario, subjects }) {
       network_namespace: isolation.network_namespace,
       fallback_reason: isolation.fallback_reason,
       sandbox: sandboxMode,
+      strict_container: strictContainer,
       sandbox_image: sandboxMode === 'container' ? sandboxImage : null,
-      sandbox_image_digest: sandboxMode === 'container' ? (process.env.AC_SANDBOX_IMAGE_DIGEST ?? null) : null,
+      sandbox_image_id: sandboxMode === 'container' ? sandboxImageId : null,
+      sandbox_image_id_source: sandboxMode === 'container' ? (sandboxImageId ? 'docker-inspect-id' : null) : null,
+      sandbox_image_digest_env: sandboxMode === 'container' ? sandboxImageDigestEnv : null,
+      sandbox_image_digest_env_verified: false,
+      job_id: safeJob === 'nojob' ? null : safeJob,
     },
   };
 }

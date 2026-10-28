@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { executeSubject } from '../src/executor.js';
 import { assessIsolation, detectNetworkIsolation, supportsFsContainment } from '../src/isolation.js';
@@ -10,7 +11,8 @@ import { verify } from '../src/index.js';
 import { demoScenario, FIXTURES } from './helpers.js';
 
 const LIMITS = { timeout_ms: 5000, max_memory_mb: 128, max_output_bytes: 16384 };
-const FIX = (name) => path.join(new URL('.', import.meta.url).pathname, '..', 'fixtures', name);
+const here = path.dirname(fileURLToPath(import.meta.url));
+const FIX = (name) => path.join(here, '..', 'fixtures', name);
 
 /**
  * Local isolation boundary (offline, no Meta, no budget):

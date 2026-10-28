@@ -105,6 +105,16 @@ export function containerEnvArgs(env = {}) {
  * Builds a `docker run --rm ...` argv for one candidate execution.
  * Pure function — fully testable offline with no daemon.
  */
+export function buildLabels(labels = {}) {
+  const out = [];
+  for (const [k, v] of Object.entries(labels)) {
+    if (!/^[a-z0-9][a-z0-9_.-]*$/i.test(k)) throw new Error('container_refused: unsafe label key');
+    if (typeof v !== 'string' || !HOST_PATH_RE.test(v)) throw new Error('container_refused: unsafe label value');
+    out.push('--label', `${k}=${v}`);
+  }
+  return out;
+}
+
 export function buildDockerRunArgs({
   image = SANDBOX_IMAGE,
   workspaceHostPath,
@@ -113,6 +123,7 @@ export function buildDockerRunArgs({
   env = {},
   limits = {},
   name = null,
+  labels = {},
 } = {}) {
   if (!workspaceHostPath || !HOST_PATH_RE.test(workspaceHostPath)) {
     throw new Error('container_refused: workspace host path is missing or unsafe');
@@ -124,6 +135,7 @@ export function buildDockerRunArgs({
   const argv = [
     'run', '--rm',
     ...(name ? ['--name', name] : []),
+    ...buildLabels(labels),
     '--network', 'none',
     ...containerBaseFlags(),
     '-v', `${workspaceHostPath}:/work:rw`,
@@ -135,9 +147,9 @@ export function buildDockerRunArgs({
 }
 
 /** `docker network create --internal <name>`: no external route, by the daemon. */
-export function buildNetworkCreateArgs(name) {
+export function buildNetworkCreateArgs(name, labels = {}) {
   if (!name || !NAME_RE.test(name)) throw new Error('container_refused: unsafe network name');
-  return ['network', 'create', '--internal', name];
+  return ['network', 'create', '--internal', ...buildLabels(labels), name];
 }
 
 /**
@@ -151,13 +163,14 @@ export function buildSidecarScript(profile, runId) {
 }
 
 /** Detached sidecar on the isolated network. Pure builder (offline-testable). */
-export function buildSidecarArgs({ image = SANDBOX_IMAGE, network, name = SIDECAR_NAME, profile, runId }) {
+export function buildSidecarArgs({ image = SANDBOX_IMAGE, network, name = SIDECAR_NAME, profile, runId, labels = {} }) {
   if (!network || !NAME_RE.test(network)) throw new Error('container_refused: unsafe network name');
   if (!name || !NAME_RE.test(name)) throw new Error('container_refused: unsafe sidecar name');
   const argv = [
     'run', '-d', '--rm',
     '--network', network,
     '--name', name,
+    ...buildLabels(labels),
     ...containerBaseFlags({ memory: '128m', cpus: '0.5', pidsLimit: '32' }),
   ];
   argv.push(image, 'node', '-e', buildSidecarScript(profile, runId));
@@ -165,7 +178,7 @@ export function buildSidecarArgs({ image = SANDBOX_IMAGE, network, name = SIDECA
 }
 
 /** Candidate container on the isolated network mounting core + subject read-only. */
-export function buildAgentArgs({ image = SANDBOX_IMAGE, network, coreDir, subjectDir, env = {}, name = null }) {
+export function buildAgentArgs({ image = SANDBOX_IMAGE, network, coreDir, subjectDir, env = {}, name = null, labels = {} }) {
   if (!network || !NAME_RE.test(network)) throw new Error('container_refused: unsafe network name');
   if (!coreDir || !HOST_PATH_RE.test(coreDir)) throw new Error('container_refused: unsafe core mount');
   if (!subjectDir || !HOST_PATH_RE.test(subjectDir)) throw new Error('container_refused: unsafe subject mount');
@@ -175,6 +188,7 @@ export function buildAgentArgs({ image = SANDBOX_IMAGE, network, coreDir, subjec
   const argv = [
     'run', '--rm', '-i',
     ...(name ? ['--name', name] : []),
+    ...buildLabels(labels),
     '--network', network,
     ...containerBaseFlags(),
     '-v', `${coreDir}:/app-core:ro`,

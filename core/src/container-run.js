@@ -116,28 +116,29 @@ export function runContainerAgent(
     // daemon gives it no external route), so baseline candidates stay
     // contained with simply no resource to reach.
     const needSidecar = Boolean(job.substituted && job.resourceProfile);
+    const labels = job.labels ?? {};
     const cleanup = [];
     try {
-      await execFn('docker', buildNetworkCreateArgs(net), { timeout: 15000 });
+      await execFn('docker', buildNetworkCreateArgs(net, labels), { timeout: 15000 });
       cleanup.push(['docker', ['network', 'rm', net]]);
       let sidecarAddress = null;
       if (needSidecar) {
         await execFn(
           'docker',
-          buildSidecarArgs({ image, network: net, name: sname, profile: job.resourceProfile, runId }),
+          buildSidecarArgs({ image, network: net, name: sname, profile: job.resourceProfile, runId, labels }),
           { timeout: 30000 },
         );
         cleanup.push(['docker', ['rm', '-f', sname]]);
         if (!(await waitSidecarReady(execFn, sname))) {
-          return { agent_error: 'Sidecar did not become ready on the isolated network.', stderr: await dockerLogs(execFn, sname) };
+          return { agent_error: 'Sidecar did not become ready on the isolated network.', stderr: await dockerLogs(execFn, sname), container_evidence: await inspectNetworkEvidence(execFn, net) };
         }
         sidecarAddress = sidecarUrl(sname);
       }
       if (needSidecar) activeSandboxNames.containers.add(sname);
       cleanup.push(['docker', ['rm', '-f', agentName]]);
       const containerJob = { ...job, subjectDir: '/subject', ...(sidecarAddress ? { externalResourceUrl: sidecarAddress } : {}) };
-      const argv = buildAgentArgs({ image, network: net, coreDir, subjectDir: job.subjectDir, env: {}, name: agentName });
-      return await new Promise((resolve) => {
+      const argv = buildAgentArgs({ image, network: net, coreDir, subjectDir: job.subjectDir, env: {}, name: agentName, labels });
+      const outcome = await new Promise((resolve) => {
         let stdout = '';
         let stderr = '';
         let settled = false;
@@ -194,6 +195,13 @@ export function runContainerAgent(
         child.stdin.write(`${JSON.stringify(containerJob)}\n`);
         child.stdin.end();
       });
+      // Execution evidence captured BEFORE cleanup removes the network:
+      // the daemon's own record (id + labels) for this run_id. Best-effort:
+      // null when the daemon is already unreachable — never fabricated.
+      // (--rm containers are already gone at this point, so the persistent
+      // network record is the inspectable object; per-condition agent
+      // results with run_id remain the primary execution proof.)
+      return { ...outcome, container_evidence: await inspectNetworkEvidence(execFn, net) };
     } finally {
       for (const [cmd, args] of cleanup.reverse()) {
         try {
@@ -205,6 +213,22 @@ export function runContainerAgent(
       activeSandboxNames.networks.delete(net);
     }
   })();
+}
+
+/**
+ * Best-effort daemon record of the per-run isolated network (id + labels).
+ * Only identifiers — no env, no mounts, no secrets are ever collected.
+ */
+async function inspectNetworkEvidence(execFn, net) {
+  try {
+    const { stdout } = await execFn('docker', ['network', 'inspect', net], { timeout: 10000 });
+    const parsed = JSON.parse(String(stdout ?? ''));
+    const n0 = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!n0) return null;
+    return { network_id: n0.Id ?? null, network_name: n0.Name ?? net, labels: n0.Labels ?? null };
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -224,7 +248,12 @@ export async function runCandidateContainer(
     // so without this the container cannot even read its own workspace
     // (observed on the runner as status=crash on every mounted probe).
     // The workspace holds only a copy of the candidate code — never secrets.
-    await execFileAsync('chmod', ['-R', 'a+rwX', workspace], { timeout: 10000 });
+    // Windows has no chmod binary (ENOENT): Docker Desktop file sharing does
+    // not enforce POSIX owner bits the same way, so the step is skipped
+    // there by design and kept mandatory on POSIX runners.
+    if (process.platform !== 'win32') {
+      await execFileAsync('chmod', ['-R', 'a+rwX', workspace], { timeout: 10000 });
+    }
     // Named so a wedged run can be killed server-side even if the exec
     // timeout path itself fails (observed: orphaned `docker run` CLI).
     const cname = `ac-c-${Date.now().toString(36)}-${(candidateSeq++).toString(36)}`;
