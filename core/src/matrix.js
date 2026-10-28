@@ -281,9 +281,16 @@ export async function runMatrix({ scenario, subjects }) {
   // covers resource startup + the gate + cleanup.
   const outerTimeoutMs = limits.timeout_ms + 15_000;
 
+  // Progress heartbeat (stderr only — never stdout, never candidate content,
+  // never secrets): one start line per condition plus one done line, so a
+  // silent CI stretch is attributable to an exact condition instead of an
+  // opaque whole-matrix gap. CI timestamps each line.
+  console.error(`[ac-matrix] start conditions=${CONDITIONS.length} sandbox=${sandboxMode} image=${sandboxMode === 'container' ? sandboxImage : 'n/a'}`);
+
   for (const condition of CONDITIONS) {
     const subjectDir = condition.version === 'original' ? subjects.original : subjects.patched;
     const substituted = condition.environment === 'substituted';
+    console.error(`[ac-matrix] condition ${condition.key} (${condition.version}/${condition.environment}) start sandbox=${sandboxMode}`);
 
     let trial = null;
     let attempts = 0;
@@ -319,6 +326,7 @@ export async function runMatrix({ scenario, subjects }) {
       const gateOk = substituted ? trial.observation.intervention_valid === true : true;
       if (trial.observation.status === 'completed' && gateOk) break;
     }
+    console.error(`[ac-matrix] condition ${condition.key} done status=${trial.observation.status} gate=${substituted ? trial.observation.intervention_valid : 'n/a'} attempts=${attempts}`);
 
     const stdoutExcerpt = trial.condition.stdout_excerpt ?? '';
     const recurred = readObservation(stdoutExcerpt, scenario.unsafe_event);
