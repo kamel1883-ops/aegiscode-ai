@@ -92,7 +92,13 @@ async function main() {
     intervention.valid = intervention.actual_status === job.validityChecks?.expect_status
       && intervention.body_matched === true
       && intervention.probes >= minProbes;
-    if (!intervention.valid && intervention.probes < minProbes) {
+    // The reason from the first verifyIntervention call above was computed
+    // before the sidecar log was refreshed (probes counted as 0). The
+    // recomputed valid/probes below are authoritative; refresh the reason to
+    // match instead of keeping the stale string. Numbers are untouched.
+    if (intervention.valid) {
+      intervention.reason = 'The synthetic resource was proven to have executed before the subject code ran.';
+    } else if (intervention.probes < minProbes) {
       intervention.reason = `Readiness probes (${intervention.probes}) below the required minimum (${minProbes}).`;
     }
     intervention.certificate = {

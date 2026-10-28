@@ -225,10 +225,28 @@ function renderMarkdown(report) {
     lines.push(`**Supplied digest (env, UNVERIFIED — not proof of what ran):** \`${report.isolation.sandbox_image_digest_env}\``);
   }
   lines.push('');
-  lines.push(`**Network isolation:** ${report.isolation.network_namespace === 'none' ? 'not available in this environment' : report.isolation.network_namespace}`);
-  if (report.isolation.fallback_reason) {
-    lines.push('');
-    lines.push(`*Reason it is not active:* ${report.isolation.fallback_reason}`);
+  if (report.isolation.sandbox === 'container') {
+    // The host namespace line below would misdescribe a container job: the
+    // coordinator runs on the host (namespace: none there), while each
+    // condition ran in its own daemon-created `--internal` Docker network.
+    // Describe the executed setup from per-condition evidence instead.
+    lines.push('**Container networks (per condition, `--internal`, daemon-recorded):**');
+    for (const c of report.conditions) {
+      const cont = c.isolation?.containers;
+      const ev = c.container_evidence;
+      const netRef = cont?.network ? `\`${cont.network}\`` : '—';
+      const evRef = ev?.network_id ? ` (daemon id \`${ev.network_id}\`, labels recorded)` : ' (inspect not recorded — proof incomplete)';
+      const agentRef = cont?.agent ? ` · agent \`${cont.agent}\`` : '';
+      const sideRef = cont?.sidecar ? ` · sidecar \`${cont.sidecar}\`` : '';
+      lines.push(`- Condition ${c.condition}: network ${netRef}${evRef}${agentRef}${sideRef}`);
+    }
+    lines.push('**Host network namespace:** not available in this environment (host coordinator only — conditions above ran in the isolated Docker networks, not on the host).');
+  } else {
+    lines.push(`**Network isolation:** ${report.isolation.network_namespace === 'none' ? 'not available in this environment' : report.isolation.network_namespace}`);
+    if (report.isolation.fallback_reason) {
+      lines.push('');
+      lines.push(`*Reason it is not active:* ${report.isolation.fallback_reason}`);
+    }
   }
   lines.push('');
   lines.push('| Condition | Agent PID | Subject PID | Workspace deleted | Container |');
