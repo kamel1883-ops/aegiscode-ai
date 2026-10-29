@@ -560,10 +560,13 @@ function renderAdvisory() {
   // Candidate-report separation: the automatic functional/acceptance of the
   // verification job, from the saved harness report only. Missing before
   // summarize — shown as pending, never invented.
+  // The server stores the acceptance as the decision string (older and current
+  // records alike); accept a legacy object shape too — never crash, never invent.
+  const verAcceptance = typeof ver?.acceptance === 'string' ? ver.acceptance : ver?.acceptance?.decision ?? null;
   const advFunc = $('advisory-functional');
   if (advFunc) {
-    if (ver && ver.functional && typeof ver.functional.status === 'string' && ver.acceptance && typeof ver.acceptance.decision === 'string') {
-      advFunc.textContent = `Candidate verification ${a.verification_job_id ?? ''}: automatic functional ${ver.functional.status} · acceptance ${ver.acceptance.decision}. Human decision stays on the verification report below.`;
+    if (ver && ver.functional && typeof ver.functional.status === 'string' && typeof verAcceptance === 'string') {
+      advFunc.textContent = `Candidate verification ${a.verification_job_id ?? ''}: automatic functional ${ver.functional.status} · acceptance ${verAcceptance}. Human decision stays on the verification report below.`;
     } else if (a.verification_job_id) {
       advFunc.textContent = `Candidate verification ${a.verification_job_id}: harness result pending — open its report for the automatic functional/acceptance once completed.`;
     } else {

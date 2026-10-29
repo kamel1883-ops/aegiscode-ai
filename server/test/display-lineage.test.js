@@ -139,5 +139,17 @@ test('advisory resolves via advisory id, source id, and verification id — same
     assert.ok(report.acceptance && typeof report.acceptance.decision === 'string', 'acceptance present');
     assert.ok(report.human_decision && typeof report.human_decision.status === 'string', 'human decision present');
     assert.notEqual(report.acceptance.decision, report.human_decision.status, 'automatic acceptance and human decision are separate fields');
+
+    // Summarize locks the advisory contract the UI renders: acceptance is the
+    // decision string (older and current records alike), functional carries
+    // its status. The UI must read both shapes without crashing.
+    const summary = await call('POST', `/api/meta/advisory/${advisory.id}/summarize`);
+    assert.equal(summary.status, 200);
+    const done = (await summary.json()).advisory;
+    assert.ok(done.verification, 'summarize fills the verification slot');
+    assert.equal(typeof done.verification.acceptance, 'string', 'acceptance is stored as the decision string');
+    assert.ok(done.verification.functional === null || typeof done.verification.functional.status === 'string', 'functional carries its status when present');
+    const reread = await call('GET', `/api/meta/advisory/${advisory.id}`);
+    assert.equal((await reread.json()).advisory.verification.acceptance, done.verification.acceptance, 'the stored shape survives a refetch');
   });
 });
