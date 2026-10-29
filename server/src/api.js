@@ -351,9 +351,11 @@ export function createApiServer({ store, queue, tokens, accounts, meta = null })
         const action = advMatch[2] ?? null;
         const owner = actor.scope === 'user' ? actor.username : null;
         // Isolation: someone else's advisory is treated as if it did not exist.
-        // A GET accepts either the advisory id or the source job id, so the UI
-        // can look up "the advisory of this job" directly.
-        const record = advisory.get(id) ?? advisory.findBySourceJob(id);
+        // A GET accepts the advisory id, the source job id, or the verification
+        // job id, so the UI can look up the lineage from either report without
+        // new calls. POST actions (summarize/cancel) still require the advisory
+        // id inside the service — a source/verification id never triggers them.
+        const record = advisory.get(id) ?? advisory.findBySourceJob(id) ?? (action === null && method === 'GET' ? advisory.findByVerificationJob(id) : null);
         if (!record || (owner !== null && record.owner !== owner)) {
           sendJson(res, 404, { error: 'Advisory not found.' });
           return;

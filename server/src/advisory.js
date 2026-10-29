@@ -127,6 +127,11 @@ export class AdvisoryService {
     return [...this.records.values()].find((r) => r.source_job_id === sourceJobId) ?? null;
   }
 
+  findByVerificationJob(verificationJobId) {
+    if (!verificationJobId) return null;
+    return [...this.records.values()].find((r) => r.verification_job_id === verificationJobId) ?? null;
+  }
+
   get(id) {
     return this.records.get(id) ?? null;
   }

@@ -319,6 +319,24 @@ async function openReport(id) {
     sandboxLine.textContent = parts.join(' · ');
   }
 
+  // Automatic harness decision (security + functional) — from the saved report
+  // only, never recomputed here. Missing fields in historic reports are shown
+  // as "not recorded", never invented.
+  const funcLine = $('functional-line');
+  if (funcLine) {
+    const f = report.functional;
+    const a = report.acceptance;
+    const fText = f && typeof f.status === 'string'
+      ? `Automatic: functional regression ${f.status}${f.reason ? ` — ${f.reason}` : ''}`
+      : 'Automatic: functional regression not recorded in this historic report.';
+    const aText = a && typeof a.decision === 'string'
+      ? `Overall acceptance ${a.decision}${a.reason ? ` — ${a.reason}` : ''}`
+      : 'Overall acceptance not recorded in this historic report.';
+    funcLine.textContent = `${fText} · ${aText}`;
+  }
+  const lineageLine = $('lineage-line');
+  if (lineageLine) lineageLine.textContent = '';
+
   // The four-condition matrix — cells are built with textContent, never with
   // innerHTML, so nothing server-sourced is ever interpreted as markup.
   const tbody = $('matrix').querySelector('tbody');
@@ -480,6 +498,14 @@ async function loadAdvisory(jobId) {
 
   if (!currentAdvisory) {
     $('advisory-body').classList.add('hidden');
+    $('advisory-open-verification')?.classList.add('hidden');
+    $('advisory-open-source')?.classList.add('hidden');
+    const noAdvFunctional = $('advisory-functional');
+    if (noAdvFunctional) noAdvFunctional.textContent = '';
+    const noAdvLineage = $('advisory-lineage');
+    if (noAdvLineage) noAdvLineage.textContent = '';
+    const noLineage = $('lineage-line');
+    if (noLineage) noLineage.textContent = `Report ${jobId} — no advisory cycle recorded for this job in this session.`;
     $('advisory-summarize').classList.add('hidden');
     $('advisory-cancel').classList.add('hidden');
     $('advisory-start').classList.remove('hidden');
@@ -530,6 +556,50 @@ function renderAdvisory() {
     : (a.verification_job_id
       ? `Verification job ${a.verification_job_id} was submitted to the harness — waiting for the verdict…`
       : '');
+
+  // Candidate-report separation: the automatic functional/acceptance of the
+  // verification job, from the saved harness report only. Missing before
+  // summarize — shown as pending, never invented.
+  const advFunc = $('advisory-functional');
+  if (advFunc) {
+    if (ver && ver.functional && typeof ver.functional.status === 'string' && ver.acceptance && typeof ver.acceptance.decision === 'string') {
+      advFunc.textContent = `Candidate verification ${a.verification_job_id ?? ''}: automatic functional ${ver.functional.status} · acceptance ${ver.acceptance.decision}. Human decision stays on the verification report below.`;
+    } else if (a.verification_job_id) {
+      advFunc.textContent = `Candidate verification ${a.verification_job_id}: harness result pending — open its report for the automatic functional/acceptance once completed.`;
+    } else {
+      advFunc.textContent = '';
+    }
+  }
+  // Bidirectional lineage with full IDs. Buttons only open saved reports
+  // (GET) — they never start a call or a verification.
+  const advLineage = $('advisory-lineage');
+  const openVerBtn = $('advisory-open-verification');
+  const openSrcBtn = $('advisory-open-source');
+  const lineageLine = $('lineage-line');
+  const isSourceView = advisorySourceJobId === a.source_job_id;
+  const isVerificationView = advisorySourceJobId === a.verification_job_id;
+  if (advLineage) {
+    advLineage.textContent = `Advisory ${a.id} · source ${a.source_job_id ?? '—'} · verification ${a.verification_job_id ?? '—'}`;
+  }
+  if (lineageLine) {
+    lineageLine.textContent = isSourceView && a.verification_job_id
+      ? `Source report ${a.source_job_id} — candidate tested separately in verification report ${a.verification_job_id}.`
+      : isVerificationView
+        ? `Candidate verification report ${a.verification_job_id} of advisory ${a.id} — source report ${a.source_job_id}. Candidate untrusted, never applied.`
+        : `Advisory ${a.id} · source ${a.source_job_id ?? '—'} · verification ${a.verification_job_id ?? '—'}.`;
+  }
+  if (openVerBtn) {
+    const showVer = Boolean(isSourceView && a.verification_job_id);
+    openVerBtn.classList.toggle('hidden', !showVer);
+    openVerBtn.onclick = showVer ? () => openReport(a.verification_job_id) : null;
+    openVerBtn.textContent = showVer ? `Open verification report ${a.verification_job_id}` : 'Open verification report';
+  }
+  if (openSrcBtn) {
+    const showSrc = Boolean(isVerificationView && a.source_job_id);
+    openSrcBtn.classList.toggle('hidden', !showSrc);
+    openSrcBtn.onclick = showSrc ? () => openReport(a.source_job_id) : null;
+    openSrcBtn.textContent = showSrc ? `Open source report ${a.source_job_id}` : 'Open source report';
+  }
 
   $('advisory-summary').textContent = a.summary ? a.summary.text : '';
 
