@@ -164,10 +164,23 @@ $('job-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   $('job-error').textContent = '';
 
+  // Functional contract matching the demo patched code: it must render
+  // AC::TEMPLATE_RENDERED locally and make zero template fetches. The
+  // computed-render proof is intentionally off here — the UI demo patch
+  // does not implement it (see core/scenarios/demo-template-fetch.json
+  // for the full contract). Without this, a candidate that merely exits
+  // would pass functionally by default.
+  const functionalChecks = {
+    require_markers: ['AC::TEMPLATE_RENDERED'],
+    forbid_template_fetch_in_patch: true,
+    require_dynamic_echo: false,
+    require_computed_render: false,
+  };
   const scenario = {
     id: $('scenario-id').value.trim(),
     unsafe_event: $('unsafe-event').value.trim(),
     legitimate_behavior_checks: [$('legit-check').value.trim()],
+    functional_checks: functionalChecks,
     baseline_environment: { description: 'Baseline: no network resource available', network: 'loopback-only' },
     permitted_interventions: [{ kind: 'synthetic_resource', name: 'template-endpoint' }],
     synthetic_resource_profile: { kind: 'loopback_http', path: '/template', status: 200, body: 'AC-RESOURCE-MARKER' },
@@ -194,6 +207,7 @@ $('job-form').addEventListener('submit', async (e) => {
       id: $('scenario-id').value.trim(),
       unsafe_event: $('unsafe-event').value.trim(),
       legitimate_behavior_checks: [$('legit-check').value.trim()],
+      functional_checks: functionalChecks,
       baseline_environment: { description: 'Baseline: no network resource available', network: 'loopback-only' },
       permitted_interventions: [{ kind: 'synthetic_resource', name: 'template-endpoint' }],
       synthetic_resource_profile: { kind: 'loopback_http', path: '/template', status: 200, body: 'AC-RESOURCE-MARKER' },
