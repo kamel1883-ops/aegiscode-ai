@@ -373,15 +373,19 @@ export class AdvisoryService {
 
     record.calls.push(this._callEntry('summarize', summary));
     record.summary = { text: summary.text, at: new Date().toISOString() };
+    // The chip state comes from the harness verdict AND its functional
+    // acceptance — never from the model. A causally supported but
+    // functionally degenerate candidate (feature removed) must not read
+    // "verified": it stays "completed" until a human decides.
+    const acceptance = verification.report?.acceptance?.decision ?? null;
     record.verification = {
       job_id: verification.id,
       verdict: verification.verdict,
       reason: verification.reason,
+      acceptance,
+      functional: verification.report?.functional ?? null,
     };
-    // The chip state comes from the harness verdict — never from the model:
-    // verified only for a supported patch, inconclusive only for an
-    // inconclusive verdict; a decisive negative stays simply "tested".
-    record.status = verification.verdict === 'patch_supported'
+    record.status = acceptance === 'accepted' && verification.verdict === 'patch_supported'
       ? 'verified'
       : verification.verdict === 'inconclusive'
         ? 'inconclusive'
