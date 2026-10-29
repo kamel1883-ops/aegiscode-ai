@@ -47,6 +47,16 @@ Options:
   --data <dir>     storage directory (default ./data)
   --help           print this message
 
+Environment:
+  AC_SANDBOX=require-container
+                   strict Docker execution for verification jobs
+                   (refused outright when the daemon is unavailable).
+  AC_ALLOW_LIVE_EXECUTION=1
+                   explicit opt-in: live model-generated candidates may
+                   be executed, and only inside a verified boundary
+                   (network namespace or the strict container profile
+                   above). Default off: live candidates are refused.
+
 No merge interface and no code modification: adoption is a documented human
 decision only.
 `;

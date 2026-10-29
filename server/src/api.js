@@ -144,6 +144,9 @@ export function createApiServer({ store, queue, tokens, accounts, meta = null })
     queue,
     budget: new BudgetManager(store.dir),
     client: createMetaClient({ env: process.env, dir: store.dir }),
+    // Explicit opt-in only (default off): live model-generated candidates
+    // are never executed without it, even where a boundary exists.
+    allowLiveExecution: process.env.AC_ALLOW_LIVE_EXECUTION === '1',
   });
 
   return createHttpServer(async (req, res) => {

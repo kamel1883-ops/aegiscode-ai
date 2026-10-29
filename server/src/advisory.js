@@ -193,6 +193,26 @@ export class AdvisoryService {
       } catch {
         assessment = null;
       }
+      // Strict-container equivalence: the validated Docker path (per-run
+      // --internal networks, read-only mounts, secret denylists, limits,
+      // deterministic cleanup, negative tests, COMPLETE per-condition
+      // evidence) satisfies the boundary where a host network namespace
+      // cannot exist (Windows). The explicit server opt-in is still
+      // required — never implied. Per-job strict enforcement remains the
+      // real guarantee: any infra failure rejects the job outright.
+      if (!assessment?.canExecuteUntrusted && process.env.AC_SANDBOX === 'require-container') {
+        try {
+          const { dockerAvailable } = await import('../../core/src/container.js');
+          if ((await dockerAvailable()) && this.allowLiveExecution) {
+            assessment = {
+              ...(assessment ?? {}),
+              container_boundary: true,
+              canExecuteUntrusted: true,
+              reasons: [...(assessment?.reasons ?? []), 'strict-container Docker boundary (daemon reachable) + explicit opt-in'],
+            };
+          }
+        } catch { /* daemon check failed: refusal stands */ }
+      }
       if (!assessment?.canExecuteUntrusted) {
         await this.store.record('meta.advisory.isolation_refused', sourceJobId, {
           network_namespace: assessment?.network_namespace ?? 'unknown',
